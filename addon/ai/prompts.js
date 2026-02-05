@@ -27,9 +27,14 @@ export function buildSystemInstruction(kind) {
       "Cost control (CRITICAL): each SOQL extraction must be as narrow as possible.",
       "- Select ONLY the fields required for the final SQL output, joins, filters, and ordering. Do NOT use SELECT *.",
       "- Avoid full-table dumps. Always add a selective WHERE clause unless the user explicitly requests a full export.",
-      "- Include a LIMIT (default to LIMIT 200) unless the user explicitly requests otherwise.",
+      "- Each CTE SOQL MUST include a date-bounded WHERE clause to limit results. If the user doesn't specify any limiting criteria, default to `CreatedDate = TODAY` (or use `LastModifiedDate = TODAY` if CreatedDate isn't available). The user can remove/adjust later.",
       "- Prefer filtering by selective fields (Id, CreatedDate, LastModifiedDate, RecordTypeId, IsDeleted, etc.) when possible.",
-      "- If you need to match a subset (e.g. Name LIKE '%rec%'), still include an additional bounding filter (date range, status) when possible."
+      "- If you need to match a subset (e.g. Name LIKE '%rec%'), still include an additional bounding filter (date range, status) when possible.",
+      "",
+      "SQLite compatibility (CRITICAL for the final SQL):",
+      "- The final query runs in SQLite. Use SQLite-friendly syntax.",
+      "- Do NOT use positional GROUP BY / ORDER BY (e.g. `GROUP BY 1,2`). Use explicit column names or aliases.",
+      "- Avoid database-specific functions not available in SQLite."
     ].join("\n");
   }
 
@@ -42,7 +47,7 @@ export function buildSystemInstruction(kind) {
     "Cost control (CRITICAL): keep the query narrow and selective.",
     "- Select ONLY the fields needed for the user's request. Avoid pulling lots of columns.",
     "- Avoid full-table dumps. Add a selective WHERE clause unless the user explicitly requests otherwise.",
-    "- Include a LIMIT (default to LIMIT 200) unless the user explicitly requests otherwise."
+    "- If the user doesn't specify any limiting criteria, default to adding `WHERE CreatedDate = TODAY` (or `LastModifiedDate = TODAY` if CreatedDate isn't available). The user can remove/adjust later."
   ].join("\n");
 }
 
@@ -73,8 +78,8 @@ export function buildFixPrompt({kind, userInstruction, query, error, schemaText}
     "Fix the query. Return ONLY the corrected query text (no explanations, no markdown).",
     "",
     kind === QueryKind.sqlCte
-      ? "Remember: CTE format must include /* SOQL: ... */ comments inside each CTE and start with WITH. Keep each SOQL extraction narrow (minimal fields, selective WHERE, default LIMIT 200)."
-      : "Remember: the query must be valid SOQL and start with SELECT. Keep it narrow (minimal fields, selective WHERE, default LIMIT 200).",
+      ? "Remember: CTE format must include /* SOQL: ... */ comments inside each CTE and start with WITH. Keep each SOQL extraction narrow and ALWAYS include a date-bounded WHERE clause (default to CreatedDate = TODAY if not specified). Final SQL must be SQLite-friendly and must NOT use positional GROUP BY/ORDER BY."
+      : "Remember: the query must be valid SOQL and start with SELECT. Keep it narrow and include a selective WHERE clause (default to CreatedDate = TODAY if not specified).",
     "",
     "## Schema",
     schema,

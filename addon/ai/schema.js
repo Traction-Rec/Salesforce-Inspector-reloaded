@@ -155,6 +155,13 @@ export function suggestSObjectsFromPrompt(promptText, sobjectList, maxResults = 
 
   const scored = [];
   for (const obj of sobjectList) {
+    // Avoid auto-suggesting Share/History objects; they are expensive/noisy and rarely intended.
+    // Users can still manually select them from the full list if needed.
+    const objNameLower = String(obj.name || "").toLowerCase();
+    if (objNameLower.endsWith("__share") || objNameLower.endsWith("__history")) {
+      continue;
+    }
+
     const nameLower = obj.name.toLowerCase();
     const nameClean = nameLower.replace(/__c$/, "");
     const labelLower = (obj.label || "").toLowerCase();
