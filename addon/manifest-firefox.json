@@ -26,6 +26,7 @@
     "https://*.visualforce.mil/*",
     "https://*.crmforce.mil/*",
     "https://*.force.com.mcas.ms/*",
+    "https://generativelanguage.googleapis.com/*",
     "cookies"
   ],
   "content_scripts": [
@@ -81,8 +82,13 @@
     "field-creator.html",
     "options.html",
     "event-monitor.html",
-    "flow-scanner.html"
+    "flow-scanner.html",
+    "sql-query.html",
+    "lib/sql-parser.js",
+    "lib/alasql.min.js",
+    "alasql-sandbox.html"
   ],
+  "content_security_policy": "script-src 'self' 'unsafe-eval'; object-src 'self'",
   "incognito": "spanning",
   "manifest_version": 2
 }

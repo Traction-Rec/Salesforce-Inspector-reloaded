@@ -4,6 +4,25 @@ import {getLinkTarget, nullToEmptyString, isOptionEnabled, PromptTemplate, Const
 /* global initButton */
 import {Enumerable, DescribeInfo, initScrollTable, s} from "./data-load.js";
 import {PageHeader} from "./components/PageHeader.js";
+import AIAssistModal from "./components/AIAssistModal.js";
+import {getGeminiConfig, geminiGenerate, extractQueryFromResponse, isGeminiEnabled} from "./ai/gemini.js";
+import {QueryKind, buildSystemInstruction, buildGenerationPrompt, buildFixPrompt} from "./ai/prompts.js";
+import {collectSchemaForObjects, fetchSObjectNames, suggestSObjectsFromPrompt, extractSObjectNamesFromSoql} from "./ai/schema.js";
+
+function looksTruncatedSql(sql) {
+  const s = String(sql || "");
+  if (!s.trim()) return true;
+  // Obvious unfinished comment
+  if (s.includes("/*") && !s.includes("*/")) return true;
+  // Balance parentheses heuristic
+  let depth = 0;
+  for (const ch of s) {
+    if (ch === "(") depth++;
+    if (ch === ")") depth--;
+    if (depth < 0) break;
+  }
+  return depth !== 0;
+}
 
 class QueryHistory {
   constructor(storageKey, max) {
@@ -1410,6 +1429,12 @@ class App extends React.Component {
     this.onClearSavedHistory = this.onClearSavedHistory.bind(this);
     this.onToggleHelp = this.onToggleHelp.bind(this);
     this.onToggleAI = this.onToggleAI.bind(this);
+    this.onOpenGeminiGenerate = this.onOpenGeminiGenerate.bind(this);
+    this.onOpenGeminiFix = this.onOpenGeminiFix.bind(this);
+    this.onCloseGeminiModal = this.onCloseGeminiModal.bind(this);
+    this.onResolveSObjects = this.onResolveSObjects.bind(this);
+    this.onGeminiRequest = this.onGeminiRequest.bind(this);
+    this.onGeminiInsert = this.onGeminiInsert.bind(this);
     this.onToggleExpand = this.onToggleExpand.bind(this);
     this.onToggleSavedOptions = this.onToggleSavedOptions.bind(this);
     this.onExport = this.onExport.bind(this);
@@ -1424,7 +1449,12 @@ class App extends React.Component {
     this.onResultsFilterInput = this.onResultsFilterInput.bind(this);
     this.onSetQueryName = this.onSetQueryName.bind(this);
     this.onStopExport = this.onStopExport.bind(this);
-    this.state = {hideButtonsOption: JSON.parse(localStorage.getItem("hideExportButtonsOption")), isDropdownOpen: false};// Tracks whether the dropdown is open
+    this.state = {
+      hideButtonsOption: JSON.parse(localStorage.getItem("hideExportButtonsOption")),
+      isDropdownOpen: false,
+      showGeminiModal: false,
+      geminiModalMode: "generate"
+    };// Tracks whether the dropdown is open
     this.filterColumns = []; // Initialize as an empty array
     this.onAddTab = this.onAddTab.bind(this);
     this.onRemoveTab = this.onRemoveTab.bind(this);
@@ -1537,6 +1567,104 @@ class App extends React.Component {
     let {model} = this.props;
     model.toggleAI();
     model.didUpdate();
+  }
+
+  onOpenGeminiGenerate(e) {
+    e.preventDefault();
+    this.setState({showGeminiModal: true, geminiModalMode: "generate"});
+  }
+
+  onOpenGeminiFix(e) {
+    e.preventDefault();
+    this.setState({showGeminiModal: true, geminiModalMode: "fix"});
+  }
+
+  onCloseGeminiModal() {
+    this.setState({showGeminiModal: false});
+  }
+
+  async onResolveSObjects({promptText}) {
+    let {model} = this.props;
+    const currentQuery = model.queryInput?.value || "";
+
+    // Objects already in the current SOQL
+    const fromQuery = extractSObjectNamesFromSoql(currentQuery);
+
+    // Fetch org's full SObject list
+    const allObjects = await fetchSObjectNames({useToolingApi: model.queryTooling});
+
+    // Fuzzy-match prompt to build pre-selected suggestions
+    const promptMatches = suggestSObjectsFromPrompt(promptText, allObjects);
+    const suggestionNames = [];
+    const seen = new Set();
+    for (const name of fromQuery) {
+      if (!seen.has(name.toLowerCase())) { seen.add(name.toLowerCase()); suggestionNames.push(name); }
+    }
+    for (const obj of promptMatches) {
+      if (!seen.has(obj.name.toLowerCase())) { seen.add(obj.name.toLowerCase()); suggestionNames.push(obj.name); }
+    }
+
+    return {suggestions: suggestionNames, allObjects};
+  }
+
+  async onGeminiRequest({promptText, selectedObjects}) {
+    let {model} = this.props;
+    const mode = this.state.geminiModalMode;
+    const currentQuery = model.queryInput?.value || "";
+
+    const schemaText = await collectSchemaForObjects({
+      objectNames: selectedObjects,
+      useToolingApi: model.queryTooling
+    });
+
+    const systemInstruction = buildSystemInstruction(QueryKind.soql);
+    const userPrompt = mode === "fix"
+      ? buildFixPrompt({
+        kind: QueryKind.soql,
+        userInstruction: promptText,
+        query: currentQuery,
+        error: model.exportError || "",
+        schemaText
+      })
+      : buildGenerationPrompt({
+        kind: QueryKind.soql,
+        userRequest: promptText,
+        schemaText
+      });
+
+    const {apiKey, model: geminiModel} = getGeminiConfig();
+    const text = await geminiGenerate({
+      apiKey,
+      model: geminiModel,
+      systemInstruction,
+      userPrompt
+    });
+
+    const extracted = extractQueryFromResponse(text, {kind: "soql"});
+    if (!extracted) {
+      throw new Error("Gemini returned an empty result.");
+    }
+    // Defensive: SOQL should at least look complete.
+    if (looksTruncatedSql(extracted)) {
+      // This heuristic is shared; for SOQL it mainly catches dangling comments/parentheses.
+      throw new Error("Gemini response looks truncated (unbalanced parentheses or unterminated comment). Try again, or switch to a larger model.");
+    }
+    return extracted;
+  }
+
+  onGeminiInsert(queryText) {
+    let {model} = this.props;
+    const q = String(queryText || "").trim();
+    if (!q) return;
+
+    model.updateCurrentTabQuery(q);
+    model.queryAutocompleteHandler();
+    if (model.queryInput) {
+      model.queryInput.value = q;
+    }
+    model.saveQueryTabs();
+    model.didUpdate();
+    this.setState({showGeminiModal: false});
   }
   onToggleExpand(e) {
     e.preventDefault();
@@ -1864,6 +1992,21 @@ class App extends React.Component {
       )
       )
       ),
+      // Gemini AI assistance button (global toggle in Options → Management)
+      isGeminiEnabled() && h("div", {
+        key: "gemini-ai-btn",
+        className: "slds-builder-header__utilities-item slds-p-top_x-small slds-p-horizontal_x-small sfir-border-none"
+      },
+      h("button", {
+        className: "slds-button slds-button_icon slds-button_icon-border-filled",
+        title: "AI assistance (Gemini)",
+        onClick: this.onOpenGeminiGenerate
+      },
+      h("svg", {className: "slds-button__icon", "aria-hidden": "true"},
+        h("use", {xlinkHref: "symbols.svg#einstein"})
+      )
+      )
+      ),
       // Help button
       h("div", {
         key: "help-btn",
@@ -1882,6 +2025,19 @@ class App extends React.Component {
     ].filter(Boolean); // Remove null items
 
     return h("div", {},
+      h(AIAssistModal, {
+        isOpen: this.state.showGeminiModal,
+        title: "AI assistance (Gemini)",
+        mode: this.state.geminiModalMode,
+        kindLabel: "SOQL",
+        query: model.queryInput?.value || "",
+        errorText: model.exportError || "",
+        initialPrompt: "",
+        onClose: this.onCloseGeminiModal,
+        onResolveSObjects: this.onResolveSObjects,
+        onRequest: this.onGeminiRequest,
+        onInsert: this.onGeminiInsert
+      }),
       h(PageHeader, {
         pageTitle: "Data Export",
         orgName: model.orgName,
@@ -2180,6 +2336,13 @@ class App extends React.Component {
               hidden: model.exportError == null,
               style: {flex: "1 1 0", minHeight: 0, resize: "none"}
             }),
+            model.exportError && isGeminiEnabled() && h("div", {className: "slds-m-top_x-small slds-text-align_right"},
+              h("button", {
+                className: "slds-button slds-button_brand",
+                title: "Send the error + query to Gemini and get a fixed query",
+                onClick: this.onOpenGeminiFix
+              }, "Fix with AI")
+            ),
             h("div", {
               ref: "scroller",
               hidden: model.exportError != null,

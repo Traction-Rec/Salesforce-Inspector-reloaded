@@ -194,6 +194,32 @@ class OptionsTabSelector extends React.Component {
         ]
       },
       {
+        id: "management",
+        tabTitle: "Management",
+        content: [
+          {option: Option, props: {type: "toggle", title: "Enable Gemini AI assistance", key: "geminiEnabled", default: true, tooltip: "When enabled, AI assistance buttons will be available in Data Export and SQL Query."}},
+          {option: Option, props: {type: "toggle", title: "Gemini debug logging", key: "geminiDebugLogging", default: false, tooltip: "Logs Gemini request/response metadata to the console (model, finish reason, token usage, lengths)."}},
+          {option: Option, props: {type: "password", title: "Gemini API Key", key: "geminiApiKey", inputSize: "6", placeholder: "Paste your Gemini API key", tooltip: "Stored in localStorage (unencrypted). Anyone with access to your browser profile can read it."}},
+          {
+            option: Option,
+            props: {
+              type: "select",
+              title: "Gemini model",
+              key: "geminiModel",
+              default: "gemini-2.5-flash",
+              tooltip: "Model to use for query generation and fixing.",
+              options: [
+                {label: "gemini-3-flash-preview", value: "gemini-3-flash-preview"},
+                {label: "gemini-3-pro-preview", value: "gemini-3-pro-preview"},
+                {label: "gemini-2.5-flash (default)", value: "gemini-2.5-flash"},
+                {label: "gemini-2.5-pro", value: "gemini-2.5-pro"},
+                {label: "gemini-2.0-flash", value: "gemini-2.0-flash"}
+              ]
+            }
+          }
+        ]
+      },
+      {
         id: "data-export",
         tabTitle: "Data Export",
         content: [
@@ -695,7 +721,7 @@ class Option extends React.Component {
       // Use localStorage for regular options
       value = localStorage.getItem(this.key);
       if (props.default !== undefined && value === null) {
-        value = props.type != "text" ? JSON.stringify(props.default) : props.default;
+        value = (props.type != "text" && props.type != "password") ? JSON.stringify(props.default) : props.default;
         localStorage.setItem(this.key, value);
       }
     }
@@ -766,7 +792,7 @@ class Option extends React.Component {
   }
 
   renderInputControl(id, isEnhanced = false) {
-    const isTextOrNumber = this.type == "text" || this.type == "number";
+    const isTextOrNumber = this.type == "text" || this.type == "number" || this.type == "password";
     const isTextArea = this.type == "textarea";
     const isSelect = this.type == "select";
     const isToggle = this.type == "toggle";
@@ -787,7 +813,7 @@ class Option extends React.Component {
     }
 
     const inputElement = isTextOrNumber ? h("input", {
-      type: this.type,
+      type: this.type === "password" ? "password" : this.type,
       id,
       className: isEnhanced ? "slds-input enhanced-option-input" : "slds-input",
       placeholder: this.placeholder,

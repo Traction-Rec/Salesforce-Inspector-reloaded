@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>AlaSQL Sandbox</title>
+</head>
+<body>
+<script src="lib/alasql.min.js"></script>
+<script>
+// Sandboxed page for running AlaSQL queries.
+// This page is declared in the manifest "sandbox" key so it gets a relaxed CSP
+// that allows eval() (which AlaSQL requires internally).
+// Communication with the parent page happens via postMessage.
+
+window.addEventListener('message', function(event) {
+  var data = event.data;
+  if (!data || data.id === undefined || !data.action) return;
+
+  var id = data.id;
+  var action = data.action;
+  var args = data.args || {};
+
+  try {
+    var result;
+
+    switch (action) {
+      case 'exec':
+        result = alasql(args.sql, args.params || []);
+        break;
+
+      case 'loadTable': {
+        var name = args.name;
+        var columns = args.columns;
+        var records = args.records;
+        // replace=true (default) drops & recreates the table; false appends rows.
+        var replace = args.replace !== false;
+
+        if (replace) {
+          try { alasql('DROP TABLE IF EXISTS [' + name + ']'); } catch (e) { /* ignore */ }
+
+          if (!columns || columns.length === 0) {
+            alasql('CREATE TABLE [' + name + '] (_empty INT)');
+            result = {columns: [], rowCount: 0};
+            break;
+          }
+
+          var colDefs = columns.map(function(c) { return '[' + c + ']'; }).join(', ');
+          alasql('CREATE TABLE [' + name + '] (' + colDefs + ')');
+        }
+
+        // Bulk insert via SELECT * FROM ? (much faster than row-by-row)
+        if (records && records.length > 0) {
+          alasql('INSERT INTO [' + name + '] SELECT * FROM ?', [records]);
+        }
+
+        result = {columns: columns || [], rowCount: records ? records.length : 0};
+        break;
+      }
+
+      case 'dropTable':
+        try { alasql('DROP TABLE IF EXISTS [' + args.name + ']'); } catch (e) { /* ignore */ }
+        result = true;
+        break;
+
+      default:
+        throw new Error('Unknown action: ' + action);
+    }
+
+    event.source.postMessage({id: id, result: result}, '*');
+  } catch (err) {
+    event.source.postMessage({id: id, error: err.message}, '*');
+  }
+});
+
+// Signal to parent that sandbox is ready
+if (window.parent !== window) {
+  window.parent.postMessage({type: 'alasql-ready'}, '*');
+}
+</script>
+</body>
+</html>

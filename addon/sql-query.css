@@ -1,0 +1,95 @@
+/* SQL Query page specific styles */
+/* Base layout styles (textarea, buttons, result-bar, etc.) are inherited from data-export.css */
+
+/* Override query textarea for monospace font */
+#query {
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+}
+
+/* Progress panel styles */
+.progress-panel {
+  background-color: #f4f6f9;
+  border: 1px solid #dddbda;
+  border-radius: 4px;
+  padding: 12px;
+  margin-top: 12px;
+}
+
+.progress-item {
+  display: flex;
+  align-items: center;
+  padding: 4px 0;
+  font-size: 0.875rem;
+}
+
+.progress-item.pending {
+  color: #706e6b;
+}
+
+.progress-item.in-progress {
+  color: #0070d2;
+}
+
+.progress-item.completed {
+  color: #04844b;
+}
+
+.progress-item.error {
+  color: #c23934;
+}
+
+.progress-icon {
+  width: 16px;
+  height: 16px;
+  margin-right: 8px;
+}
+
+.progress-spinner {
+  width: 16px;
+  height: 16px;
+  margin-right: 8px;
+  border: 2px solid #f3f3f3;
+  border-top: 2px solid #0070d2;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.progress-check {
+  color: #04844b;
+  margin-right: 8px;
+}
+
+.progress-x {
+  color: #c23934;
+  margin-right: 8px;
+}
+
+.progress-details {
+  margin-left: auto;
+  font-size: 0.75rem;
+  color: #706e6b;
+}
+
+/* SQLite loading indicator */
+.sqlite-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  color: #706e6b;
+}
+
+.sqlite-loading-spinner {
+  width: 24px;
+  height: 24px;
+  margin-right: 12px;
+  border: 3px solid #f3f3f3;
+  border-top: 3px solid #9b59b6;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
