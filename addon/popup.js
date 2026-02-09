@@ -123,6 +123,7 @@ class App extends React.PureComponent {
       isPopupExpanded: false, // Track if popup is expanded/active
       exportHref: "data-export.html?" + hostArg,
       importHref: "data-import.html?" + hostArg,
+      sqlQueryHref: "sql-query.html?" + hostArg,
       eventMonitorHref: "event-monitor.html?" + hostArg,
       fieldCreatorHref: "field-creator.html?" + hostArg,
       limitsHref: "limits.html?" + hostArg,
@@ -375,6 +376,7 @@ class App extends React.PureComponent {
       apiVersionInput,
       exportHref,
       importHref,
+      sqlQueryHref,
       eventMonitorHref,
       fieldCreatorHref,
       limitsHref,
@@ -532,6 +534,23 @@ class App extends React.PureComponent {
                   className: "page-button slds-button slds-button_neutral",
                 },
                 h("span", {}, "Data ", h("u", {}, "I"), "mport")
+              )
+            ),
+            h(
+              "div",
+              {
+                className:
+                "slds-col slds-size_1-of-1 slds-p-horizontal_xx-small slds-m-bottom_xx-small",
+              },
+              h(
+                "a",
+                {
+                  ref: "sqlQueryBtn",
+                  href: sqlQueryHref,
+                  target: linkTarget,
+                  className: "page-button slds-button slds-button_neutral",
+                },
+                h("span", {}, "S", h("u", {}, "Q"), "L Query (Join)")
               )
             ),
             h("div", {className: "slds-col slds-size_1-of-1 slds-p-horizontal_xx-small  slds-m-bottom_xx-small"},

@@ -27,7 +27,8 @@
     "https://*.visualforce.mil/*",
     "https://*.crmforce.mil/*",
     "https://*.force.com.mcas.ms/*",
-    "https://*.builder.salesforce-experience.com/*"
+    "https://*.builder.salesforce-experience.com/*",
+    "https://generativelanguage.googleapis.com/*"
   ],
   "content_scripts": [
     {
@@ -85,7 +86,11 @@
         "options.html",
         "event-monitor.html",
         "flow-scanner.html",
-        "debug-log.html"
+        "debug-log.html",
+        "sql-query.html",
+        "lib/sql-parser.js",
+        "lib/alasql.min.js",
+        "alasql-sandbox.html"
       ],
       "matches": [
         "https://*.salesforce.com/*",
@@ -111,6 +116,9 @@
       "extension_ids": []
     }
   ],
+  "sandbox": {
+    "pages": ["alasql-sandbox.html"]
+  },
   "incognito": "split",
   "manifest_version": 3,
   "commands": {
@@ -170,6 +178,9 @@
     },
     "api-statistics": {
       "description": "API Statistics"
+    },
+    "sql-query": {
+      "description": "SQL Query (Join)"
     }
   }
 }
