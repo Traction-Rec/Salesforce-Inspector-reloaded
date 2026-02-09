@@ -4,11 +4,10 @@ import {nullToEmptyString, UserInfoModel, createSpinForMethod, copyToClipboard, 
 /* global initButton */
 import {initScrollTable, s} from "./data-load.js";
 import {PageHeader} from "./components/PageHeader.js";
-import {extractCTEs, getFinalQuery, parseQuery, validateSOQL} from "./lib/sql-parser.js";
-import AIAssistModal from "./components/AIAssistModal.js";
-import {getGeminiConfig, geminiGenerate, extractQueryFromResponse, isGeminiEnabled} from "./ai/gemini.js";
-import {QueryKind, buildSystemInstruction, buildGenerationPrompt, buildFixPrompt} from "./ai/prompts.js";
-import {collectSchemaForObjects, fetchSObjectNames, suggestSObjectsFromPrompt, extractSObjectNamesFromSoql} from "./ai/schema.js";
+import {parseQuery} from "./lib/sql-parser.js";
+import ChatPanel from "./components/ChatPanel.js";
+import {isGeminiEnabled} from "./ai/gemini.js";
+import {ConversationManager} from "./ai/conversation.js";
 
 /**
  * Flatten a Salesforce record: converts nested related objects to dot-notation
@@ -33,25 +32,6 @@ function flattenRecord(obj, prefix = "", result = {}) {
     }
   }
   return result;
-}
-
-function looksTruncatedSqlCte(queryText) {
-  const s = String(queryText || "").trim();
-  if (!s) return true;
-  if (!/^WITH\s/i.test(s)) return true;
-  // Unterminated SOQL comment
-  if (s.includes("/*") && !s.includes("*/")) return true;
-  // Parentheses balance heuristic
-  let depth = 0;
-  for (const ch of s) {
-    if (ch === "(") depth++;
-    if (ch === ")") depth--;
-    if (depth < 0) break;
-  }
-  if (depth !== 0) return true;
-  // Must have a final SELECT after the CTEs (best-effort check)
-  if (!/\)\s*,[\s\S]*\)\s*SELECT\s/i.test(s) && !/\)\s*SELECT\s/i.test(s)) return true;
-  return false;
 }
 
 /**
@@ -478,6 +458,180 @@ ORDER BY a.Name`;
 
     // Result table callback (for scroll table)
     this.resultTableCallback = null;
+
+    // Conversation manager (initialized lazily when chat opens)
+    this.conversationManager = null;
+
+    // Dedicated SQLite instance for chat/AI diagnostic queries (avoids clobbering the user's main results)
+    this._chatSqliteManager = null;
+    this._chatSqliteReady = false;
+  }
+
+  /**
+   * Ensure the ConversationManager is initialized.
+   * Called when the chat panel is first opened.
+   */
+  ensureConversationManager() {
+    if (this.conversationManager) {
+      // Keep tooling API flag in sync
+      this.conversationManager.useToolingApi = this.queryTooling;
+      return;
+    }
+
+    this.conversationManager = new ConversationManager({
+      sfConn,
+      useToolingApi: this.queryTooling,
+      executeSoqlCallback: async (soql) => this._executeSoqlForChat(soql),
+      executeQueryCallback: async (sql) => this._executeQueryForChat(sql),
+      onChange: () => this.didUpdate()
+    });
+  }
+
+  /**
+   * Execute a single SOQL query for the chat/AI.
+   * Returns {success, rowCount, columns, columnTypes, _rows} or {success: false, error}.
+   */
+  async _executeSoqlForChat(soql) {
+    try {
+      const activeTurn = this.conversationManager?._turn;
+      const records = [];
+      let totalSize = 0;
+      let endpoint = "/services/data/v" + apiVersion + (this.queryTooling ? "/tooling/query" : "/query") + "/?q=" + encodeURIComponent(soql);
+      const MAX_PAGES = 5; // Safety: limit pagination API calls for chat diagnostics
+      let pages = 0;
+
+      while (endpoint && pages < MAX_PAGES) {
+        if (this.conversationManager?._turn !== activeTurn) throw new Error("Chat query cancelled");
+        const response = await sfConn.rest(endpoint);
+        records.push(...response.records);
+        if (pages === 0) totalSize = response.totalSize || 0;
+        endpoint = response.done ? null : response.nextRecordsUrl;
+        pages++;
+        // Safety: cap at 200 records for chat diagnostic queries
+        if (records.length >= 200) break;
+      }
+
+      if (records.length === 0) {
+        // SELECT COUNT() FROM ... returns the count in totalSize but with an
+        // empty records array.  Create a synthetic row so the AI sees the value.
+        if (/\bCOUNT\s*\(\s*\)/i.test(soql)) {
+          return {
+            success: true,
+            rowCount: 1,
+            columns: ["count"],
+            _rows: [{count: totalSize}],
+            aggregateValues: [{count: totalSize}]
+          };
+        }
+        return {success: true, rowCount: 0, columns: [], _rows: []};
+      }
+
+      const flatRecords = records.map(r => flattenRecord(r));
+      const colSet = new Set();
+      for (const rec of flatRecords) {
+        for (const key of Object.keys(rec)) colSet.add(key);
+      }
+      const columns = Array.from(colSet);
+      const rows = flatRecords.map(rec => {
+        const row = {};
+        for (const col of columns) row[col] = rec[col] !== undefined ? rec[col] : null;
+        return row;
+      });
+
+      const result = {success: true, rowCount: rows.length, columns, _rows: rows};
+      // Detect aggregate queries (COUNT, SUM, etc.) and include values directly
+      // in metadata so the AI can see results without needing row data consent.
+      // Aggregate results don't contain PII — they're safe to auto-include.
+      if (/\b(COUNT|SUM|AVG|MIN|MAX)\s*\(/i.test(soql) && rows.length <= 5) {
+        result.aggregateValues = rows;
+      }
+      return result;
+    } catch (e) {
+      return {success: false, error: e.message || String(e)};
+    }
+  }
+
+  /**
+   * Ensure the dedicated chat SQLiteManager is initialized.
+   * Uses a separate instance so chat diagnostic queries don't clobber the user's main results.
+   */
+  async _ensureChatSqlite() {
+    if (this._chatSqliteReady) return;
+    if (!this._chatSqliteManager) {
+      this._chatSqliteManager = new SQLiteManager();
+    }
+    await this._chatSqliteManager.init();
+    this._chatSqliteReady = true;
+  }
+
+  /**
+   * Fetch records with a cap on total records and pagination pages.
+   * Used by chat/AI queries to prevent runaway API usage.
+   */
+  async _fetchRecordsCapped(soql, maxRecords = 2000) {
+    const activeTurn = this.conversationManager?._turn;
+    const records = [];
+    let endpoint = "/services/data/v" + apiVersion + (this.queryTooling ? "/tooling/query" : "/query") + "/?q=" + encodeURIComponent(soql);
+    const MAX_PAGES = 10;
+    let pages = 0;
+
+    while (endpoint && pages < MAX_PAGES) {
+      if (this.conversationManager?._turn !== activeTurn) throw new Error("Chat query cancelled");
+      const response = await sfConn.rest(endpoint);
+      records.push(...response.records);
+      endpoint = response.done ? null : response.nextRecordsUrl;
+      pages++;
+      if (records.length >= maxRecords) break;
+    }
+
+    return records;
+  }
+
+  /**
+   * Execute a full SQL-with-CTEs query for the chat/AI.
+   * Uses a dedicated SQLite instance to avoid interfering with the user's main query.
+   * Returns {success, rowCount, columns, _rows} or {success: false, error}.
+   */
+  async _executeQueryForChat(sql) {
+    try {
+      const parsed = parseQuery(sql);
+      if (parsed.error) throw new Error(parsed.error);
+
+      if (parsed.type === "soql") {
+        return this._executeSoqlForChat(parsed.soql);
+      }
+
+      // SQL with CTEs — run through the full pipeline using the dedicated chat SQLite
+      await this._ensureChatSqlite();
+      await this._chatSqliteManager.reset();
+
+      for (const cte of parsed.ctes) {
+        if (!cte.soql) continue;
+        const cacheKey = this._soqlCacheKey(cte.soql);
+        const cached = this._soqlCache.get(cacheKey);
+
+        if (cached) {
+          await this._chatSqliteManager.createTableFromRecords(cte.name, cached.records);
+        } else {
+          // Cap at 2000 records per CTE for chat diagnostic queries to prevent runaway API usage
+          const records = await this._fetchRecordsCapped(cte.soql, 2000);
+          // Do NOT write to _soqlCache: chat fetches are capped and would silently
+          // truncate data if the user later runs the same query in the main pipeline.
+          await this._chatSqliteManager.createTableFromRecords(cte.name, records);
+        }
+      }
+
+      const {columns, values} = await this._chatSqliteManager.executeQuery(parsed.finalQuery);
+      const rows = values.map(row => {
+        const obj = {};
+        columns.forEach((col, i) => { obj[col] = row[i]; });
+        return obj;
+      });
+
+      return {success: true, rowCount: values.length, columns, _rows: rows.slice(0, 100)};
+    } catch (e) {
+      return {success: false, error: e.message || String(e)};
+    }
   }
 
   didUpdate(cb) {
@@ -801,12 +955,7 @@ class App extends React.Component {
     this.onClearCache = this.onClearCache.bind(this);
     this.onToggleHelp = this.onToggleHelp.bind(this);
     this.onToggleTooling = this.onToggleTooling.bind(this);
-    this.onOpenGeminiGenerate = this.onOpenGeminiGenerate.bind(this);
-    this.onOpenGeminiFix = this.onOpenGeminiFix.bind(this);
-    this.onCloseGeminiModal = this.onCloseGeminiModal.bind(this);
-    this.onResolveSObjects = this.onResolveSObjects.bind(this);
-    this.onGeminiRequest = this.onGeminiRequest.bind(this);
-    this.onGeminiInsert = this.onGeminiInsert.bind(this);
+    this.onInsertQueryFromChat = this.onInsertQueryFromChat.bind(this);
     this.onCopyAsExcel = this.onCopyAsExcel.bind(this);
     this.onCopyAsCsv = this.onCopyAsCsv.bind(this);
     this.onCopyAsJson = this.onCopyAsJson.bind(this);
@@ -814,12 +963,38 @@ class App extends React.Component {
     this.onResultsFilterInput = this.onResultsFilterInput.bind(this);
     this.onSelectHistoryEntry = this.onSelectHistoryEntry.bind(this);
     this.onClearHistory = this.onClearHistory.bind(this);
+    this._onDrawerResizeStart = this._onDrawerResizeStart.bind(this);
 
     this.state = {
       showHelp: false,
-      showGeminiModal: false,
-      geminiModalMode: "generate"
+      drawerWidth: 380
     };
+  }
+
+  // --- Drawer resize via drag handle ---
+  _onDrawerResizeStart(e) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = this.state.drawerWidth;
+
+    const onMouseMove = (ev) => {
+      // Dragging left increases width, dragging right decreases it
+      const delta = startX - ev.clientX;
+      const newWidth = Math.max(260, Math.min(startWidth + delta, window.innerWidth * 0.6));
+      this.setState({drawerWidth: newWidth});
+    };
+
+    const onMouseUp = () => {
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
   }
 
   componentDidMount() {
@@ -827,6 +1002,11 @@ class App extends React.Component {
 
     // Initialize SQLite in background
     model.initSQLite();
+
+    // Eagerly initialise conversation manager so the chat drawer is ready
+    if (isGeminiEnabled()) {
+      model.ensureConversationManager();
+    }
 
     // Set up scroll table if available
     this.initScrollTableIfNeeded();
@@ -878,125 +1058,18 @@ class App extends React.Component {
   onToggleTooling(e) {
     let {model} = this.props;
     model.queryTooling = e.target.checked;
+    if (model.conversationManager) {
+      model.conversationManager.useToolingApi = e.target.checked;
+    }
     model.didUpdate();
   }
 
-  onOpenGeminiGenerate(e) {
-    e.preventDefault();
-    this.setState({showGeminiModal: true, geminiModalMode: "generate"});
-  }
-
-  onOpenGeminiFix(e) {
-    e.preventDefault();
-    this.setState({showGeminiModal: true, geminiModalMode: "fix"});
-  }
-
-  onCloseGeminiModal() {
-    this.setState({showGeminiModal: false});
-  }
-
-  _extractSoqlListFromQueryText(queryText) {
-    try {
-      const parsed = parseQuery(queryText || "");
-      if (parsed?.type === "soql" && parsed.soql) {
-        return [parsed.soql];
-      }
-      if (parsed?.type === "sql" && Array.isArray(parsed.ctes)) {
-        return parsed.ctes.map(c => c.soql).filter(Boolean);
-      }
-    } catch (e) {
-      // Ignore parse errors; fallback to regex.
-    }
-
-    const soqls = [];
-    const re = /\/\*\s*SOQL:\s*([\s\S]*?)\s*\*\//gi;
-    let m;
-    while ((m = re.exec(queryText || ""))) {
-      if (m[1]) soqls.push(m[1].trim());
-    }
-    return soqls;
-  }
-
-  async onResolveSObjects({promptText}) {
-    let {model} = this.props;
-    const queryText = this.refs.query?.value || "";
-
-    // Objects already referenced in the current query
-    const soqlList = this._extractSoqlListFromQueryText(queryText);
-    const fromQuery = new Set();
-    for (const soql of soqlList) {
-      for (const name of extractSObjectNamesFromSoql(soql)) {
-        fromQuery.add(name);
-      }
-    }
-
-    // Fetch org's full SObject list
-    const allObjects = await fetchSObjectNames({useToolingApi: model.queryTooling});
-
-    // Fuzzy-match prompt to build pre-selected suggestions
-    const promptMatches = suggestSObjectsFromPrompt(promptText, allObjects);
-    const suggestionNames = [];
-    const seen = new Set();
-    for (const name of fromQuery) {
-      if (!seen.has(name.toLowerCase())) { seen.add(name.toLowerCase()); suggestionNames.push(name); }
-    }
-    for (const obj of promptMatches) {
-      if (!seen.has(obj.name.toLowerCase())) { seen.add(obj.name.toLowerCase()); suggestionNames.push(obj.name); }
-    }
-
-    return {suggestions: suggestionNames, allObjects};
-  }
-
-  async onGeminiRequest({promptText, selectedObjects}) {
-    let {model} = this.props;
-    const mode = this.state.geminiModalMode;
-    const queryText = this.refs.query?.value || "";
-
-    const schemaText = await collectSchemaForObjects({
-      objectNames: selectedObjects,
-      useToolingApi: model.queryTooling
-    });
-
-    const systemInstruction = buildSystemInstruction(QueryKind.sqlCte);
-    const userPrompt = mode === "fix"
-      ? buildFixPrompt({
-        kind: QueryKind.sqlCte,
-        userInstruction: promptText,
-        query: queryText,
-        error: model.exportError || "",
-        schemaText
-      })
-      : buildGenerationPrompt({
-        kind: QueryKind.sqlCte,
-        userRequest: promptText,
-        schemaText
-      });
-
-    const {apiKey, model: geminiModel} = getGeminiConfig();
-    const text = await geminiGenerate({
-      apiKey,
-      model: geminiModel,
-      systemInstruction,
-      userPrompt
-    });
-
-    const extracted = extractQueryFromResponse(text, {kind: "sql"});
-    if (!extracted) {
-      throw new Error("Gemini returned an empty result.");
-    }
-    if (looksTruncatedSqlCte(extracted)) {
-      throw new Error("Gemini response looks truncated or invalid for CTE format. Enable Gemini debug logging in Options → Management, then retry.");
-    }
-    return extracted;
-  }
-
-  onGeminiInsert(queryText) {
+  onInsertQueryFromChat(queryText) {
     const q = String(queryText || "").trim();
     if (!q) return;
     if (this.refs.query) {
       this.refs.query.value = q;
     }
-    this.setState({showGeminiModal: false});
     let {model} = this.props;
     model.didUpdate();
   }
@@ -1064,19 +1137,6 @@ class App extends React.Component {
     let {model} = this.props;
 
     return h("div", {},
-      h(AIAssistModal, {
-        isOpen: this.state.showGeminiModal,
-        title: "AI assistance (Gemini)",
-        mode: this.state.geminiModalMode,
-        kindLabel: "SQL (CTE)",
-        query: this.refs.query?.value || model.initialQuery || "",
-        errorText: model.exportError || "",
-        initialPrompt: "",
-        onClose: this.onCloseGeminiModal,
-        onResolveSObjects: this.onResolveSObjects,
-        onRequest: this.onGeminiRequest,
-        onInsert: this.onGeminiInsert
-      }),
       h(PageHeader, {
         pageTitle: "SQL Query",
         orgName: model.orgName,
@@ -1088,121 +1148,117 @@ class App extends React.Component {
         userName: model.userInfoModel.userName
       }),
 
-      h("div", {className: "slds-m-top_xx-large sfir-page-container"},
+      h("div", {className: "slds-m-top_xx-large sfir-page-container sql-page-layout"},
 
-        // SQLite loading indicator
-        !model.sqliteReady && !model.sqliteError && h("div", {className: "sqlite-loading"},
-          h("div", {className: "sqlite-loading-spinner"}),
-          h("span", {}, "Loading SQL engine...")
-        ),
+        // Main content column
+        h("div", {className: "sql-main-content"},
 
-        // SQLite error
-        model.sqliteError && h("div", {className: "slds-notify slds-notify_alert slds-theme_error slds-m-around_medium"},
-          model.sqliteError
-        ),
+          // SQLite loading indicator
+          !model.sqliteReady && !model.sqliteError && h("div", {className: "sqlite-loading"},
+            h("div", {className: "sqlite-loading-spinner"}),
+            h("span", {}, "Loading SQL engine...")
+          ),
 
-        // Query area - wrapped in slds-card like data-export
-        model.sqliteReady && h("div", {className: "slds-card slds-m-around_medium"},
-          h("div", {className: "slds-card__body slds-card__body_inner"},
-            h("div", {className: "query-controls"},
-              h("h3", {className: "slds-text-heading_small slds-m-bottom_xx-small slds-m-left_xxx-small"}, "SQL Query"),
-              h("div", {className: "query-history-controls"},
-                h("label", {className: "slds-m-right_medium"},
-                  h("input", {
-                    type: "checkbox",
-                    checked: model.queryTooling,
-                    onChange: this.onToggleTooling
-                  }),
-                  " Use Tooling API"
-                ),
-                h("div", {className: "slds-button-group"},
-                  h("select", {
-                    onChange: this.onSelectHistoryEntry,
-                    title: "Query history",
-                    defaultValue: "",
-                    className: "query-history"
-                  },
-                    h("option", {value: "", disabled: true}, "History..."),
-                    model.queryHistory.list.map((entry, i) =>
-                      h("option", {key: i, value: i},
-                        entry.query.substring(0, 100).replace(/\s+/g, " ") + (entry.query.length > 100 ? "..." : "")
+          // SQLite error
+          model.sqliteError && h("div", {className: "slds-notify slds-notify_alert slds-theme_error slds-m-around_medium"},
+            model.sqliteError
+          ),
+
+          // Query area - wrapped in slds-card like data-export
+          model.sqliteReady && h("div", {className: "slds-card slds-m-around_medium"},
+            h("div", {className: "slds-card__body slds-card__body_inner"},
+              h("div", {className: "query-controls"},
+                h("h3", {className: "slds-text-heading_small slds-m-bottom_xx-small slds-m-left_xxx-small"}, "SQL Query"),
+                h("div", {className: "query-history-controls"},
+                  h("label", {className: "slds-m-right_medium"},
+                    h("input", {
+                      type: "checkbox",
+                      checked: model.queryTooling,
+                      onChange: this.onToggleTooling
+                    }),
+                    " Use Tooling API"
+                  ),
+                  h("div", {className: "slds-button-group"},
+                    h("select", {
+                      onChange: this.onSelectHistoryEntry,
+                      title: "Query history",
+                      defaultValue: "",
+                      className: "query-history"
+                    },
+                      h("option", {value: "", disabled: true}, "History..."),
+                      model.queryHistory.list.map((entry, i) =>
+                        h("option", {key: i, value: i},
+                          entry.query.substring(0, 100).replace(/\s+/g, " ") + (entry.query.length > 100 ? "..." : "")
+                        )
                       )
-                    )
-                  ),
-                  h("button", {
-                    className: "slds-button slds-button_neutral",
-                    onClick: this.onClearHistory,
-                    title: "Clear history",
-                    disabled: model.queryHistory.list.length === 0
-                  }, "Clear")
+                    ),
+                    h("button", {
+                      className: "slds-button slds-button_neutral",
+                      onClick: this.onClearHistory,
+                      title: "Clear history",
+                      disabled: model.queryHistory.list.length === 0
+                    }, "Clear")
+                  )
                 )
-              )
-            ),
-            h("textarea", {
-              id: "query",
-              ref: "query",
-              style: {maxHeight: (model.winInnerHeight ? model.winInnerHeight - 200 : 400) + "px"},
-              defaultValue: model.initialQuery,
-              placeholder: "Enter SQL query with CTEs...",
-              spellCheck: false
-            }),
-            h("div", {className: "autocomplete-box"},
-              h("div", {className: "autocomplete-header"},
-                h("span", {className: "slds-m-left_xx-small"}),
-                h("ul", {className: "slds-button-group-row flex-right"},
-                  isGeminiEnabled() && h("li", {className: "slds-button-group-item"},
-                    h("button", {
-                      className: "slds-button slds-button_neutral",
-                      onClick: this.onOpenGeminiGenerate,
-                      title: "AI assistance (Gemini)"
-                    }, "AI assistance")
-                  ),
-                  h("li", {className: "slds-button-group-item"},
-                    h("button", {
-                      disabled: !this.canExecute(),
-                      onClick: this.onExecute,
-                      title: "Execute query",
-                      className: "slds-button slds-button_brand"
-                    }, "Execute")
-                  ),
-                  h("li", {className: "slds-button-group-item"},
-                    h("button", {
-                      className: "slds-button slds-button_destructive",
-                      onClick: this.onCancel,
-                      disabled: !model.isWorking
-                    }, "Cancel")
-                  ),
-                  model._soqlCache.size > 0 && h("li", {className: "slds-button-group-item"},
-                    h("button", {
-                      className: "slds-button slds-button_neutral",
-                      onClick: this.onClearCache,
-                      disabled: model.isWorking,
-                      title: "Clear cached SOQL results so the next execution re-fetches all data from Salesforce"
-                    }, "Clear cache (" + model._soqlCache.size + ")")
-                  ),
-                  h("li", {className: "slds-button-group-item"},
-                    h("div", {className: "slds-dropdown-trigger"},
+              ),
+              h("textarea", {
+                id: "query",
+                ref: "query",
+                style: {maxHeight: (model.winInnerHeight ? model.winInnerHeight - 200 : 400) + "px"},
+                defaultValue: model.initialQuery,
+                placeholder: "Enter SQL query with CTEs...",
+                spellCheck: false
+              }),
+              h("div", {className: "autocomplete-box"},
+                h("div", {className: "autocomplete-header"},
+                  h("span", {className: "slds-m-left_xx-small"}),
+                  h("ul", {className: "slds-button-group-row flex-right"},
+                    h("li", {className: "slds-button-group-item"},
                       h("button", {
-                        className: "slds-button slds-button_icon slds-button_icon-more toggle " + (this.state.showHelp ? "contract" : "expand"),
-                        onClick: this.onToggleHelp,
-                        title: this.state.showHelp ? "Hide help" : "Show help"
-                      },
-                        h("div", {className: "button-icon"}),
-                        h("div", {className: "button-toggle-icon"})
+                        disabled: !this.canExecute(),
+                        onClick: this.onExecute,
+                        title: "Execute query",
+                        className: "slds-button slds-button_brand"
+                      }, "Execute")
+                    ),
+                    h("li", {className: "slds-button-group-item"},
+                      h("button", {
+                        className: "slds-button slds-button_destructive",
+                        onClick: this.onCancel,
+                        disabled: !model.isWorking
+                      }, "Cancel")
+                    ),
+                    model._soqlCache.size > 0 && h("li", {className: "slds-button-group-item"},
+                      h("button", {
+                        className: "slds-button slds-button_neutral",
+                        onClick: this.onClearCache,
+                        disabled: model.isWorking,
+                        title: "Clear cached SOQL results so the next execution re-fetches all data from Salesforce"
+                      }, "Clear cache (" + model._soqlCache.size + ")")
+                    ),
+                    h("li", {className: "slds-button-group-item"},
+                      h("div", {className: "slds-dropdown-trigger"},
+                        h("button", {
+                          className: "slds-button slds-button_icon slds-button_icon-more toggle " + (this.state.showHelp ? "contract" : "expand"),
+                          onClick: this.onToggleHelp,
+                          title: this.state.showHelp ? "Hide help" : "Show help"
+                        },
+                          h("div", {className: "button-icon"}),
+                          h("div", {className: "button-toggle-icon"})
+                        )
                       )
                     )
                   )
                 )
-              )
-            ),
+              ),
 
-            // Help text
-            !this.state.showHelp ? null : h("div", {className: "slds-box slds-theme_info slds-m-top_medium"},
-              h("h3", {className: "slds-text-heading_small slds-m-bottom_small"}, "SQL Query with SOQL Data Extraction"),
-              h("p", {className: "slds-m-bottom_x-small"}, "Write SQLite queries with CTEs (Common Table Expressions) that automatically extract data from Salesforce."),
-              h("p", {className: "slds-m-bottom_x-small"}, "Each CTE should include a ", h("code", {}, "/* SOQL: ... */"), " comment specifying the SOQL query to extract data."),
-              h("p", {className: "slds-m-bottom_x-small"}, "Example:"),
-              h("pre", {},
+              // Help text
+              !this.state.showHelp ? null : h("div", {className: "slds-box slds-theme_info slds-m-top_medium"},
+                h("h3", {className: "slds-text-heading_small slds-m-bottom_small"}, "SQL Query with SOQL Data Extraction"),
+                h("p", {className: "slds-m-bottom_x-small"}, "Write SQLite queries with CTEs (Common Table Expressions) that automatically extract data from Salesforce."),
+                h("p", {className: "slds-m-bottom_x-small"}, "Each CTE should include a ", h("code", {}, "/* SOQL: ... */"), " comment specifying the SOQL query to extract data."),
+                h("p", {className: "slds-m-bottom_x-small"}, "Example:"),
+                h("pre", {},
 `WITH accounts AS (
   /* SOQL: SELECT Id, Name, Industry FROM Account WHERE Industry != null */
   SELECT * FROM accounts
@@ -1215,95 +1271,123 @@ SELECT a.Name, a.Industry, c.FirstName, c.LastName
 FROM accounts a
 JOIN contacts c ON a.Id = c.AccountId
 WHERE a.Industry = 'Technology'`
+                ),
+                h("p", {className: "slds-m-bottom_x-small slds-m-top_small"}, h("strong", {}, "How it works:")),
+                h("ol", {},
+                  h("li", {}, "CTEs with SOQL comments are parsed and SOQL queries are extracted"),
+                  h("li", {}, "Each SOQL query is executed against Salesforce (with pagination)"),
+                  h("li", {}, "Results are loaded into an in-browser SQL database"),
+                  h("li", {}, "The final SQL query (SELECT/JOIN) is executed locally"),
+                  h("li", {}, "Results are displayed in the table below")
+                ),
+                h("p", {className: "slds-m-bottom_x-small"}, "You can also run simple SOQL queries directly (without CTEs).")
               ),
-              h("p", {className: "slds-m-bottom_x-small slds-m-top_small"}, h("strong", {}, "How it works:")),
-              h("ol", {},
-                h("li", {}, "CTEs with SOQL comments are parsed and SOQL queries are extracted"),
-                h("li", {}, "Each SOQL query is executed against Salesforce (with pagination)"),
-                h("li", {}, "Results are loaded into an in-browser SQL database"),
-                h("li", {}, "The final SQL query (SELECT/JOIN) is executed locally"),
-                h("li", {}, "Results are displayed in the table below")
-              ),
-              h("p", {className: "slds-m-bottom_x-small"}, "You can also run simple SOQL queries directly (without CTEs).")
-            ),
 
-            // Progress panel
-            h(ProgressPanel, {steps: model.progressTracker.getSteps()})
-          )
-        ),
+              // Progress panel
+              h(ProgressPanel, {steps: model.progressTracker.getSteps()})
+            )
+          ),
 
-        // Results area
-        h("div", {
-          className: "slds-card slds-m-horizontal_medium slds-m-bottom_medium",
-          id: "result-area",
-          style: {flex: "1 1 0", minHeight: 0, display: "flex", flexDirection: "column"}
-        },
-          h("div", {className: "slds-card__body slds-card__body_inner", style: {flex: "1 1 0", minHeight: 0, display: "flex", flexDirection: "column"}},
-            h("div", {className: "result-bar"},
-              h("h3", {className: "slds-text-heading_small"}, "Results"),
-              h("div", {className: "slds-button-group slds-m-left_small"},
-                h("button", {
-                  className: "slds-button slds-button_neutral",
-                  disabled: !this.canCopy(),
-                  onClick: this.onCopyAsExcel,
-                  title: "Copy results to clipboard for pasting into Excel"
-                }, "Copy (Excel)"),
-                h("button", {
-                  className: "slds-button slds-button_neutral",
-                  disabled: !this.canCopy(),
-                  onClick: this.onCopyAsCsv,
-                  title: "Copy results as CSV"
-                }, "Copy (CSV)"),
-                h("button", {
-                  className: "slds-button slds-button_neutral",
-                  disabled: !this.canCopy(),
-                  onClick: this.onCopyAsJson,
-                  title: "Copy results as JSON"
-                }, "Copy (JSON)"),
-                h("button", {
-                  className: "slds-button slds-button_neutral",
-                  disabled: !this.canCopy(),
-                  onClick: this.onDownloadAsCsv,
-                  title: "Download as CSV file"
-                },
-                  h("svg", {className: "slds-button__icon"},
-                    h("use", {xlinkHref: "symbols.svg#download"})
+          // Results area
+          h("div", {
+            className: "slds-card slds-m-horizontal_medium slds-m-bottom_medium",
+            id: "result-area",
+            style: {flex: "1 1 0", minHeight: 0, display: "flex", flexDirection: "column"}
+          },
+            h("div", {className: "slds-card__body slds-card__body_inner", style: {flex: "1 1 0", minHeight: 0, display: "flex", flexDirection: "column"}},
+              h("div", {className: "result-bar"},
+                h("h3", {className: "slds-text-heading_small"}, "Results"),
+                h("div", {className: "slds-button-group slds-m-left_small"},
+                  h("button", {
+                    className: "slds-button slds-button_neutral",
+                    disabled: !this.canCopy(),
+                    onClick: this.onCopyAsExcel,
+                    title: "Copy results to clipboard for pasting into Excel"
+                  }, "Copy (Excel)"),
+                  h("button", {
+                    className: "slds-button slds-button_neutral",
+                    disabled: !this.canCopy(),
+                    onClick: this.onCopyAsCsv,
+                    title: "Copy results as CSV"
+                  }, "Copy (CSV)"),
+                  h("button", {
+                    className: "slds-button slds-button_neutral",
+                    disabled: !this.canCopy(),
+                    onClick: this.onCopyAsJson,
+                    title: "Copy results as JSON"
+                  }, "Copy (JSON)"),
+                  h("button", {
+                    className: "slds-button slds-button_neutral",
+                    disabled: !this.canCopy(),
+                    onClick: this.onDownloadAsCsv,
+                    title: "Download as CSV file"
+                  },
+                    h("svg", {className: "slds-button__icon"},
+                      h("use", {xlinkHref: "symbols.svg#download"})
+                    )
                   )
+                ),
+                model.exportedData && model.exportedData.table.length > 1 && h("div", {className: "slds-form-element slds-m-left_small"},
+                  h("input", {
+                    type: "search",
+                    className: "slds-input slds-button slds-m-around_none",
+                    placeholder: "Filter results...",
+                    value: model.resultsFilter,
+                    onInput: this.onResultsFilterInput
+                  })
+                ),
+                h("span", {className: "result-status flex-right"},
+                  h("span", {className: `slds-badge slds-theme_${model.exportError ? "error" : "success"}`}, model.exportStatus)
                 )
               ),
-              model.exportedData && model.exportedData.table.length > 1 && h("div", {className: "slds-form-element slds-m-left_small"},
-                h("input", {
-                  type: "search",
-                  className: "slds-input slds-button slds-m-around_none",
-                  placeholder: "Filter results...",
-                  value: model.resultsFilter,
-                  onInput: this.onResultsFilterInput
-                })
+              h("textarea", {
+                className: "slds-box slds-theme_error",
+                readOnly: true,
+                value: nullToEmptyString(model.exportError),
+                hidden: model.exportError == null,
+                style: {flex: "1 1 0", minHeight: 0, resize: "none"}
+              }),
+              model.exportError && isGeminiEnabled() && h("div", {className: "slds-m-top_x-small slds-text-align_right"},
+                h("button", {
+                  className: "slds-button slds-button_brand",
+                  title: "Send error to AI chat for debugging",
+                  onClick: () => {
+                    model.ensureConversationManager();
+                    const cm = model.conversationManager;
+                    if (!cm || cm.isProcessing) return;
+                    // Avoid flooding: skip if the last user message already has the same error
+                    const lastUserMsg = [...cm.messages].reverse().find(m => m.role === "user");
+                    if (lastUserMsg?.text === "Fix this error" && lastUserMsg?.context?.error === model.exportError) return;
+                    const ctx = {};
+                    const q = this.refs.query?.value || model.initialQuery || "";
+                    if (q) ctx.query = q;
+                    if (model.exportError) ctx.error = model.exportError;
+                    cm.sendMessage("Fix this error", Object.keys(ctx).length > 0 ? ctx : null);
+                  }
+                }, "Fix with AI")
               ),
-              h("span", {className: "result-status flex-right"},
-                h("span", {className: `slds-badge slds-theme_${model.exportError ? "error" : "success"}`}, model.exportStatus)
-              )
-            ),
-            h("textarea", {
-              className: "slds-box slds-theme_error",
-              readOnly: true,
-              value: nullToEmptyString(model.exportError),
-              hidden: model.exportError == null,
-              style: {flex: "1 1 0", minHeight: 0, resize: "none"}
-            }),
-            model.exportError && isGeminiEnabled() && h("div", {className: "slds-m-top_x-small slds-text-align_right"},
-              h("button", {
-                className: "slds-button slds-button_brand",
-                title: "Send the error + query to Gemini and get a fixed query",
-                onClick: this.onOpenGeminiFix
-              }, "Fix with AI")
-            ),
-            h("div", {
-              ref: "scroller",
-              hidden: model.exportError != null,
-              style: {flex: "1 1 0", minHeight: 0, maxHeight: "100%", overflowY: "auto"}
-            })
+              h("div", {
+                ref: "scroller",
+                hidden: model.exportError != null,
+                style: {flex: "1 1 0", minHeight: 0, maxHeight: "100%", overflowY: "auto"}
+              })
+            )
           )
+        ), // Close sql-main-content
+
+        // Chat drawer (always visible when Gemini is enabled)
+        isGeminiEnabled() && h("div", {
+          className: "sql-chat-drawer",
+          style: {flexBasis: this.state.drawerWidth + "px", maxWidth: this.state.drawerWidth + "px"}
+        },
+          h("div", {className: "chat-drawer-resize-handle", onMouseDown: this._onDrawerResizeStart}),
+          h(ChatPanel, {
+            conversationManager: model.conversationManager,
+            getCurrentQuery: () => this.refs.query?.value || model.initialQuery || "",
+            currentError: model.exportError || "",
+            exportedData: model.exportedData,
+            onInsertQuery: this.onInsertQueryFromChat
+          })
         )
       ) // Close sfir-page-container
     );

@@ -94,6 +94,114 @@ export function extractTextFromGeminiResponse(data) {
   throw new Error(apiError || ("Gemini returned an unexpected response: " + safeJsonStringify(data)));
 }
 
+/**
+ * Extract response parts (text + function calls) from Gemini API response data.
+ * Returns the raw parts array from the first candidate.
+ */
+export function extractPartsFromResponse(data) {
+  const candidate = data?.candidates?.[0];
+  const parts = candidate?.content?.parts;
+
+  if (Array.isArray(parts) && parts.length > 0) {
+    return parts;
+  }
+
+  const apiError
+    = data?.error?.message
+    || data?.promptFeedback?.blockReason
+    || candidate?.finishReason;
+
+  throw new Error(apiError || ("Gemini returned an unexpected response: " + safeJsonStringify(data)));
+}
+
+/**
+ * Multi-turn Gemini API call with tool/function-calling support.
+ * Accepts a full contents[] history and optional tools[] declarations.
+ * Returns raw response parts (text parts and/or functionCall parts).
+ */
+export async function geminiGenerateWithTools({
+  apiKey,
+  model,
+  systemInstruction,
+  contents,
+  tools,
+  temperature = 0.2,
+  maxOutputTokens = 20000,
+  signal
+}) {
+  if (!apiKey) {
+    throw new Error("Missing Gemini API key. Set it in Options → Management.");
+  }
+  const normalizedModel = normalizeGeminiModelName(model);
+  if (!normalizedModel) {
+    throw new Error("Missing Gemini model. Set it in Options → Management.");
+  }
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(normalizedModel)}:generateContent`;
+
+  const body = {
+    contents,
+    generationConfig: {
+      temperature,
+      maxOutputTokens
+    }
+  };
+
+  if (systemInstruction) {
+    body.systemInstruction = {parts: [{text: String(systemInstruction)}]};
+  }
+
+  if (tools && tools.length > 0) {
+    body.tools = tools;
+    body.toolConfig = {functionCallingConfig: {mode: "AUTO"}};
+  }
+
+  if (isGeminiDebugLoggingEnabled()) {
+    const fnCalls = (contents || []).flatMap(c => (c.parts || []).filter(p => p.functionCall).map(p => p.functionCall.name));
+    console.log("[Gemini] WithTools Request", {
+      model: normalizedModel,
+      temperature,
+      maxOutputTokens,
+      contentsTurnCount: contents.length,
+      toolCount: tools?.[0]?.functionDeclarations?.length || 0,
+      recentFunctionCalls: fnCalls.slice(-5)
+    });
+  }
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-goog-api-key": apiKey
+    },
+    body: JSON.stringify(body),
+    signal
+  });
+
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const msg = json?.error?.message || `${res.status} ${res.statusText}`.trim();
+    throw new Error("Gemini request failed: " + msg);
+  }
+
+  const parts = extractPartsFromResponse(json);
+
+  if (isGeminiDebugLoggingEnabled()) {
+    const meta = extractGeminiMeta(json);
+    const textContent = parts.filter(p => p.text).map(p => p.text).join("");
+    const fnCallNames = parts.filter(p => p.functionCall).map(p => p.functionCall.name);
+    console.log("[Gemini] WithTools Response", {
+      model: normalizedModel,
+      finishReason: meta.finishReason,
+      usageMetadata: meta.usageMetadata,
+      textLength: textContent.length,
+      functionCalls: fnCallNames
+    });
+  }
+
+  return parts;
+}
+
 export async function geminiGenerate({
   apiKey,
   model,

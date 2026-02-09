@@ -6,7 +6,7 @@ import {Enumerable, DescribeInfo, initScrollTable, s} from "./data-load.js";
 import {PageHeader} from "./components/PageHeader.js";
 import AIAssistModal from "./components/AIAssistModal.js";
 import {getGeminiConfig, geminiGenerate, extractQueryFromResponse, isGeminiEnabled} from "./ai/gemini.js";
-import {QueryKind, buildSystemInstruction, buildGenerationPrompt, buildFixPrompt} from "./ai/prompts.js";
+import {buildSystemInstruction, buildGenerationPrompt, buildFixPrompt} from "./ai/prompts.js";
 import {collectSchemaForObjects, fetchSObjectNames, suggestSObjectsFromPrompt, extractSObjectNamesFromSoql} from "./ai/schema.js";
 
 function looksTruncatedSql(sql) {
@@ -1617,17 +1617,15 @@ class App extends React.Component {
       useToolingApi: model.queryTooling
     });
 
-    const systemInstruction = buildSystemInstruction(QueryKind.soql);
+    const systemInstruction = buildSystemInstruction();
     const userPrompt = mode === "fix"
       ? buildFixPrompt({
-        kind: QueryKind.soql,
         userInstruction: promptText,
         query: currentQuery,
         error: model.exportError || "",
         schemaText
       })
       : buildGenerationPrompt({
-        kind: QueryKind.soql,
         userRequest: promptText,
         schemaText
       });

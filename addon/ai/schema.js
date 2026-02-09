@@ -10,13 +10,13 @@ export function extractSObjectNamesFromSoql(soql) {
   return name ? [name] : [];
 }
 
-async function fetchSObjectDescribe({sobjectName, useToolingApi}) {
+export async function fetchSObjectDescribe({sobjectName, useToolingApi, conn}) {
   const prefix = useToolingApi ? "tooling/" : "";
   const endpoint = `/services/data/v${apiVersion}/${prefix}sobjects/${encodeURIComponent(sobjectName)}/describe`;
-  return await sfConn.rest(endpoint);
+  return await (conn || sfConn).rest(endpoint);
 }
 
-function serializeSObjectDescribe(sobjectName, describe, {maxFields = 60} = {}) {
+export function serializeSObjectDescribe(sobjectName, describe, {maxFields = 60} = {}) {
   const fields = Array.isArray(describe?.fields) ? describe.fields : [];
   const truncated = fields.length > maxFields;
   const subset = truncated ? fields.slice(0, maxFields) : fields;
@@ -38,9 +38,9 @@ function serializeSObjectDescribe(sobjectName, describe, {maxFields = 60} = {}) 
   ].filter(Boolean).join("\n");
 }
 
-async function describeSafe({sobjectName, useToolingApi, maxFields}) {
+async function describeSafe({sobjectName, useToolingApi, maxFields, conn}) {
   try {
-    const describe = await fetchSObjectDescribe({sobjectName, useToolingApi});
+    const describe = await fetchSObjectDescribe({sobjectName, useToolingApi, conn});
     return serializeSObjectDescribe(sobjectName, describe, {maxFields});
   } catch (e) {
     // Gracefully degrade so a single bad object doesn't block the whole prompt
@@ -52,7 +52,8 @@ export async function collectSoqlSchemaText({
   soql,
   useToolingApi = false,
   maxObjects = 4,
-  maxFieldsPerObject = 60
+  maxFieldsPerObject = 60,
+  conn
 }) {
   const sobjects = extractSObjectNamesFromSoql(soql).slice(0, maxObjects);
   if (sobjects.length === 0) {
@@ -60,7 +61,7 @@ export async function collectSoqlSchemaText({
   }
 
   const blocks = await Promise.all(
-    sobjects.map(sobjectName => describeSafe({sobjectName, useToolingApi, maxFields: maxFieldsPerObject}))
+    sobjects.map(sobjectName => describeSafe({sobjectName, useToolingApi, maxFields: maxFieldsPerObject, conn}))
   );
 
   return blocks.join("\n\n");
@@ -70,7 +71,8 @@ export async function collectMultiSoqlSchemaText({
   soqlList,
   useToolingApi = false,
   maxObjects = 6,
-  maxFieldsPerObject = 60
+  maxFieldsPerObject = 60,
+  conn
 }) {
   const names = uniq((soqlList || []).flatMap(extractSObjectNamesFromSoql)).slice(0, maxObjects);
   if (names.length === 0) {
@@ -78,7 +80,7 @@ export async function collectMultiSoqlSchemaText({
   }
 
   const blocks = await Promise.all(
-    names.map(sobjectName => describeSafe({sobjectName, useToolingApi, maxFields: maxFieldsPerObject}))
+    names.map(sobjectName => describeSafe({sobjectName, useToolingApi, maxFields: maxFieldsPerObject, conn}))
   );
 
   return blocks.join("\n\n");
@@ -93,13 +95,13 @@ let _sobjectListCache = null;
 /**
  * Fetch queryable SObject names (cached per tooling-api flag).
  */
-export async function fetchSObjectNames({useToolingApi = false} = {}) {
+export async function fetchSObjectNames({useToolingApi = false, conn} = {}) {
   if (_sobjectListCache && _sobjectListCache.useToolingApi === useToolingApi) {
     return _sobjectListCache.list;
   }
   const prefix = useToolingApi ? "tooling/" : "";
   const endpoint = `/services/data/v${apiVersion}/${prefix}sobjects/`;
-  const result = await sfConn.rest(endpoint);
+  const result = await (conn || sfConn).rest(endpoint);
   const list = (result.sobjects || [])
     .filter(obj => obj.queryable !== false)
     .map(obj => ({name: obj.name, label: obj.label || obj.name}));
@@ -192,11 +194,12 @@ export function suggestSObjectsFromPrompt(promptText, sobjectList, maxResults = 
 export async function collectSchemaForObjects({
   objectNames,
   useToolingApi = false,
-  maxFieldsPerObject = Infinity
+  maxFieldsPerObject = Infinity,
+  conn
 }) {
   if (!objectNames || objectNames.length === 0) return "";
   const blocks = await Promise.all(
-    objectNames.map(sobjectName => describeSafe({sobjectName, useToolingApi, maxFields: maxFieldsPerObject}))
+    objectNames.map(sobjectName => describeSafe({sobjectName, useToolingApi, maxFields: maxFieldsPerObject, conn}))
   );
   return blocks.join("\n\n");
 }
