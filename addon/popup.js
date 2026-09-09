@@ -1,12 +1,13 @@
 /* global React ReactDOM */
 import {sfConn, apiVersion, sessionError} from "./inspector.js";
-import {getLinkTarget, isOptionEnabled, isSettingEnabled, getLatestApiVersionFromOrg, setOrgInfo, getPKCEParameters, getBrowserType, getExtensionId, getClientId, getRedirectUri, Constants, copyToClipboard, DataCache, getFlowCompareUrl} from "./utils.js";
+import {getLinkTarget, isOptionEnabled, isSettingEnabled, getLatestApiVersionFromOrg, setOrgInfo, getPKCEParameters, getBrowserType, getExtensionId, getClientId, getRedirectUri, Constants, copyToClipboard, DataCache, getFlowCompareUrl, isRecordId, getSobjectsList} from "./utils.js";
 import {setupLinks} from "./links.js";
 import AlertBanner from "./components/AlertBanner.js";
 
 let p = parent;
 let hideButtonsOption = JSON.parse(localStorage.getItem("hideButtonsOption"));
 const isExtensionPage = document.location.ancestorOrigins?.[0].includes(getExtensionId());
+const RECENT_ITEMS_RENDERED_COUNT = 100;
 
 let h = React.createElement;
 if (typeof browser === "undefined") {
@@ -54,7 +55,6 @@ function getFilteredLocalStorage() {
   const domainStart = host?.split(".")[0];
   const storedData = {...localStorage};
   const keysToSend = [
-    "scrollOnFlowBuilder",
     "colorizeProdBanner",
     "colorizeSandboxBanner",
     "prodBannerText",
@@ -104,6 +104,13 @@ function initLinks({sfHost}) {
   if (localStorage.getItem(sfHost + "_orgLinks")) {
     let links = JSON.parse(localStorage.getItem(sfHost + "_orgLinks"));
     links.forEach((link) => {
+      setupLinks.push(link);
+    });
+  }
+  //add global custom links (shared across every org) to setupLink
+  if (localStorage.getItem(Constants.GLOBAL_LINKS_KEY)) {
+    let globalLinks = JSON.parse(localStorage.getItem(Constants.GLOBAL_LINKS_KEY));
+    globalLinks.forEach((link) => {
       setupLinks.push(link);
     });
   }
@@ -175,17 +182,22 @@ class App extends React.PureComponent {
     });
   }
   onContextUrlMessage(e) {
-    if (e.source == parent && e.data.insextUpdateRecordId) {
-      let {locationHref} = e.data;
-      this.setState({
-        isInSetup: locationHref.includes("/lightning/setup/"),
-        contextUrl: locationHref,
-        isPopupExpanded: true, // Popup is expanded when we receive this message
-      });
+    if (e.source == parent && e.data) {
+      if (e.data.insextUpdateRecordId) {
+        let {locationHref} = e.data;
+        this.setState({
+          isInSetup: locationHref.includes("/lightning/setup/"),
+          contextUrl: locationHref,
+          isPopupExpanded: true, // Popup is expanded when we receive this message
+        });
+      }
+
+      if ("isFieldsPresent" in e.data) {
+        this.setState({
+          isFieldsPresent: e.data.isFieldsPresent,
+        });
+      }
     }
-    this.setState({
-      isFieldsPresent: e.data.isFieldsPresent,
-    });
   }
   async getListViewQuery(sobjectName, filterName) {
     if (localStorage.getItem("enableListViewExport") !== "true" || !sobjectName || !filterName) {
@@ -240,8 +252,8 @@ class App extends React.PureComponent {
         type: config.type || "info",
         bannerText: config.bannerText || "Action completed",
         iconName: config.iconName || "info",
-        assistiveTest:
-          config.assistiveTest || config.bannerText || "Notification",
+        assistiveText:
+          config.assistiveText || config.bannerText || "Notification",
         link: config.link || null,
         onClose: config.onClose || this.hideToast,
         ...config, // Allow any additional AlertBanner props
@@ -256,6 +268,10 @@ class App extends React.PureComponent {
     });
   }
   onShortcutKey(e) {
+    // Only trigger shortcuts for single key presses (no modifier keys)
+    if (e.ctrlKey || e.altKey || e.shiftKey || e.metaKey) {
+      return;
+    }
     const refs = this.refs;
     const actionMap = {
       a: ["all", "clickAllDataBtn"],
@@ -272,6 +288,7 @@ class App extends React.PureComponent {
       m: ["click", "eventMonitorBtn"],
       v: ["click", "logsViewerBtn"],
       b: ["click", "apiStatisticsBtn"],
+      c: ["click", "dependenciesExplorerBtn"],
       o: ["tab", "objectTab"],
       u: ["tab", "userTab"],
       s: ["tab", "shortcutTab"],
@@ -417,7 +434,7 @@ class App extends React.PureComponent {
           bannerText: `Current Version: ${addonVersion}`,
           iconName: "notification",
           iconTitle: "Notification",
-          assistiveTest: "Version Update Notification",
+          assistiveText: "Version Update Notification",
           onClose: () => this.updateReleaseNotesViewed(addonVersion),
           link: {
             text: "See What's New",
@@ -434,7 +451,7 @@ class App extends React.PureComponent {
           h(AlertBanner, {type: bannerUrlAction.type,
             bannerText: bannerUrlAction.text,
             iconName: bannerUrlAction.icon,
-            assistiveTest: bannerUrlAction.text,
+            assistiveText: bannerUrlAction.text,
             onClose: null,
             link: {
               text: bannerUrlAction.title,
@@ -451,7 +468,7 @@ class App extends React.PureComponent {
             type: this.state.toastConfig.type,
             bannerText: this.state.toastConfig.bannerText,
             iconName: this.state.toastConfig.iconName,
-            assistiveTest: this.state.toastConfig.assistiveTest,
+            assistiveText: this.state.toastConfig.assistiveText,
             onClose: this.state.toastConfig.onClose,
             link: this.state.toastConfig.link,
             // Spread any additional props
@@ -462,7 +479,7 @@ class App extends React.PureComponent {
                     "type",
                     "bannerText",
                     "iconName",
-                    "assistiveTest",
+                    "assistiveText",
                     "onClose",
                     "link",
                   ].includes(key)
@@ -480,6 +497,7 @@ class App extends React.PureComponent {
             ref: "showAllDataBox",
             sfHost,
             showDetailsSupported: !inLightning && !inInspector,
+            inInspector,
             linkTarget,
             contextUrl,
             onContextRecordChange: this.onContextRecordChange,
@@ -575,23 +593,14 @@ class App extends React.PureComponent {
                 h("span", {}, "Field Crea", h("u", {}, "t"), "or")
               )
             ),
-            h(
-              "div",
-              {
-                className:
-                "slds-col slds-size_1-of-1 slds-p-horizontal_xx-small  slds-m-bottom_xx-small",
-              },
-              h(
-                "a",
-                {
-                  ref: "metaRetrieveBtn",
-                  href: `metadata-retrieve${
-                    useLegacyDownloadMetadata ? "-legacy" : ""
-                  }.html?${hostArg}`,
-                  target: linkTarget,
-                  className: "page-button slds-button slds-button_neutral",
-                },
+            h("div", {className: "slds-col slds-size_1-of-1 slds-p-horizontal_xx-small  slds-m-bottom_xx-small"},
+              h("a", {ref: "metaRetrieveBtn", href: `metadata-retrieve${useLegacyDownloadMetadata ? "-legacy" : ""}.html?${hostArg}`, target: linkTarget, className: "page-button slds-button slds-button_neutral"},
                 h("span", {}, h("u", {}, "D"), "ownload Metadata")
+              )
+            ),
+            h("div", {className: "slds-col slds-size_1-of-1 slds-p-horizontal_xx-small  slds-m-bottom_xx-small"},
+              h("a", {ref: "dependenciesExplorerBtn", href: `dependencies-explorer.html?${hostArg}`, target: linkTarget, className: "page-button slds-button slds-button_neutral"},
+                h("span", {}, "Dependen", h("u", {}, "c"), "ies Explorer")
               )
             )
           ),
@@ -812,6 +821,7 @@ class App extends React.PureComponent {
             {
               className:
               "slds-col slds-size_4-of-12 footer-small-text slds-m-top_xx-small",
+              id: "footer"
             },
             h(
               "a",
@@ -978,6 +988,7 @@ class AllDataBox extends React.PureComponent {
       contextSobject: null,
     };
     this.onAspectClick = this.onAspectClick.bind(this);
+    this.onClearSobjectsCache = this.onClearSobjectsCache.bind(this);
     this.parseContextUrl = this.ensureKnownBrowserContext.bind(this);
   }
 
@@ -987,6 +998,21 @@ class AllDataBox extends React.PureComponent {
     } else {
       this.ensureKnownBrowserContext();
     }
+
+    if (this.shouldLoadSobjects()) {
+      this.loadSobjects();
+    }
+
+    this.onSobjectsListRefreshed = (e) => {
+      if (e.detail?.sfHost === this.props.sfHost) {
+        this.setState({sobjectsList: e.detail.sobjectsList});
+      }
+    };
+    window.addEventListener(Constants.SOBJECTS_LIST_REFRESHED_EVENT, this.onSobjectsListRefreshed);
+  }
+
+  componentWillUnmount() {
+    window.removeEventListener(Constants.SOBJECTS_LIST_REFRESHED_EVENT, this.onSobjectsListRefreshed);
   }
 
   componentDidUpdate(prevProps, prevState) {
@@ -1029,10 +1055,19 @@ class AllDataBox extends React.PureComponent {
 
   /**
    * Check if sobjects should be loaded
-   * @returns {boolean} True if Objects tab is active and popup is expanded
+   * Only load in popup/button context (when inInspector is false), not when embedded in data-export, field-creator, etc.
+   * @returns {boolean} True if Objects tab is active and popup is expanded, or if preload option is enabled and popup is not yet expanded
    */
   shouldLoadSobjects() {
-    return this.props.isPopupExpanded && this.state.activeSearchAspect === this.SearchAspectTypes.sobject;
+    // Normal loading: when popup is expanded and Objects tab is active
+    if (this.props.isPopupExpanded && this.state.activeSearchAspect === this.SearchAspectTypes.sobject) {
+      return true;
+    }
+    // Preload before popup opens: only if option is enabled (not in inspector)
+    if (!this.props.isPopupExpanded && !this.props.inInspector) {
+      return isSettingEnabled(Constants.PRELOAD_SOBJECTS_BEFORE_POPUP);
+    }
+    return false;
   }
 
   ensureKnownBrowserContext() {
@@ -1096,160 +1131,14 @@ class AllDataBox extends React.PureComponent {
     // Set loading state
     this.setState({sobjectsLoading: true});
 
-    //we don't have the entity map in the in-memory cache, so we need to fetch it
-    let entityMap = new Map();
+    const {sfHost} = this.props;
 
-    function addEntity(
-      {
-        name,
-        label,
-        keyPrefix,
-        durableId,
-        isCustomSetting,
-        recordTypesSupported,
-        isEverCreatable,
-        newUrl,
-      },
-      api
-    ) {
-      label = label.match("__MISSING") ? "" : label; //Error is added to the label if no label exists
-      let entity = entityMap.get(name);
-      // Each API call enhances the data, only the Name fields are present for each call.
-      if (entity) {
-        if (!entity.keyPrefix) {
-          entity.keyPrefix = keyPrefix;
-        }
-        if (!entity.durableId) {
-          entity.durableId = durableId;
-        }
-        if (!entity.isCustomSetting) {
-          entity.isCustomSetting = isCustomSetting;
-        }
-        if (!entity.newUrl) {
-          entity.newUrl = newUrl;
-        }
-        if (!entity.recordTypesSupported) {
-          entity.recordTypesSupported = recordTypesSupported;
-        }
-        if (!entity.isEverCreatable) {
-          entity.isEverCreatable = isEverCreatable;
-        }
-      } else {
-        entity = {
-          availableApis: [],
-          name,
-          label,
-          keyPrefix,
-          durableId,
-          isCustomSetting,
-          availableKeyPrefix: null,
-          recordTypesSupported,
-          isEverCreatable,
-          newUrl,
-        };
-        entityMap.set(name, entity);
-      }
-      if (api) {
-        entity.availableApis.push(api);
-        if (keyPrefix) {
-          entity.availableKeyPrefix = keyPrefix;
-        }
-      }
-    }
-
-    function getObjects(url, api) {
-      return sfConn
-        .rest(url)
-        .then((describe) => {
-          for (let sobject of describe.sobjects) {
-            // Bugfix for when the describe call returns before the tooling query call, and isCustomSetting is undefined
-            addEntity(
-              {...sobject, isCustomSetting: sobject.customSetting},
-              api
-            );
-          }
-        })
-        .catch((err) => {
-          console.error("list " + api + " sobjects", err);
-        });
-    }
-
-    function getEntityDefinitions() {
-      let bucket = 0;
-
-      function fetchNextBatch() {
-        return getEntityDefinitionBatch(bucket)
-          .then((hasMore) => {
-            if (hasMore) {
-              bucket++;
-              return fetchNextBatch();
-            }
-            // All batches fetched
-            return Promise.resolve();
-          });
-      }
-
-      return fetchNextBatch()
-        .catch((err) => {
-          console.error("fetch entity definitions: ", err);
-        });
-    }
-
-    function getEntityDefinitionBatch(bucket) {
-      let offset = bucket > 0 ? " OFFSET " + bucket * 2000 : "";
-      let query
-        = "SELECT QualifiedApiName, Label, KeyPrefix, DurableId, IsCustomSetting, RecordTypesSupported, NewUrl, IsEverCreatable FROM EntityDefinition ORDER BY QualifiedApiName ASC LIMIT 2000"
-        + offset;
-      return sfConn
-        .rest(
-          "/services/data/v"
-            + apiVersion
-            + "/tooling/query?q="
-            + encodeURIComponent(query)
-        )
-        .then((respEntity) => {
-          for (let record of respEntity.records) {
-            addEntity(
-              {
-                name: record.QualifiedApiName,
-                label: record.Label,
-                keyPrefix: record.KeyPrefix,
-                durableId: record.DurableId,
-                isCustomSetting: record.IsCustomSetting,
-                recordTypesSupported: record.RecordTypesSupported,
-                newUrl: record.NewUrl,
-                isEverCreatable: record.IsEverCreatable,
-              },
-              null
-            );
-          }
-          return respEntity.records?.length >= 2000; // If the batch has 2000 records, there are more to fetch
-        })
-        .catch((err) => {
-          console.error("list entity definitions: ", err);
-          throw err; // Re-throw to allow error handling in calling function
-        });
-    }
-
-    Promise.all([
-      // Get objects the user can access from the regular API
-      getObjects("/services/data/v" + apiVersion + "/sobjects/", "regularApi"),
-      // Get objects the user can access from the tooling API
-      getObjects(
-        "/services/data/v" + apiVersion + "/tooling/sobjects/",
-        "toolingApi"
-      ),
-      // Get all objects, even the ones the user cannot access from any API
-      // These records are less interesting than the ones the user has access to, but still interesting since we can get information about them using the tooling API
-      // If there are too many records, we get "EXCEEDED_ID_LIMIT: EntityDefinition does not support queryMore(), use LIMIT to restrict the results to a single batch"
-      // Even if documentation mention that LIMIT and OFFSET are not supported, we use it to split the EntityDefinition queries into 2000 buckets
-      getEntityDefinitions(),
-    ])
-      .then(() => {
-        // TODO progressively display data as each of the three responses becomes available
+    // Get sobjects list (from cache or fetched from API)
+    getSobjectsList(sfHost)
+      .then((sobjectsList) => {
         this.setState({
           sobjectsLoading: false,
-          sobjectsList: Array.from(entityMap.values()),
+          sobjectsList,
         });
         // Only call getMatchesDelayed if the showAllDataBoxSObject component is rendered (i.e., user is on Objects tab)
         this.refs.showAllDataBoxSObject?.refs?.allDataSearch?.getMatchesDelayed(
@@ -1260,6 +1149,20 @@ class AllDataBox extends React.PureComponent {
         console.error(e);
         this.setState({sobjectsLoading: false});
       });
+  }
+
+  async onClearSobjectsCache() {
+    const {sfHost} = this.props;
+    await DataCache.clearCache(Constants.CACHE_SOBJECTS_LIST, sfHost, true, true);
+    this.setState({sobjectsList: null, sobjectsLoading: false}, () => {
+      this.loadSobjects();
+    });
+    if (this.props.showToast) {
+      this.props.showToast({
+        type: "success",
+        bannerText: "SObjects List cache cleared.",
+      });
+    }
   }
 
   render() {
@@ -1377,6 +1280,8 @@ class AllDataBox extends React.PureComponent {
           contextSobject,
           linkTarget,
           onContextRecordChange,
+          onClearSobjectsCache: this.onClearSobjectsCache,
+          showToast: this.props.showToast,
           isFieldsPresent,
           eventMonitorHref,
         })
@@ -1449,27 +1354,45 @@ class AllDataBoxUsers extends React.PureComponent {
       userSearchFields,
       excludeInactiveUsersFromSearch,
       excludePortalUsersFromSearch,
+      filterDropdownOpen: false,
     };
     this.getMatches = this.getMatches.bind(this);
     this.onDataSelect = this.onDataSelect.bind(this);
+    this.onFilterToggle = this.onFilterToggle.bind(this);
+    this.onFilterChange = this.onFilterChange.bind(this);
+    this.documentClickHandler = null;
+  }
+
+  onFilterToggle() {
+    this.setState(state => ({filterDropdownOpen: !state.filterDropdownOpen}));
+  }
+
+  onFilterChange(filterName, checked) {
+    const {sfHost} = this.props;
+    const option = Constants.USER_SEARCH_EXCLUSIONS_CHECKBOXES.find(o => o.name === filterName);
+    if (!option) return;
+    const newState = {[option.stateKey]: checked};
+    this.setState(newState, () => {
+      const merged = Constants.USER_SEARCH_EXCLUSIONS_CHECKBOXES.map(o => ({
+        name: o.name,
+        label: o.label,
+        checked: this.state[o.stateKey],
+      }));
+      localStorage.setItem(sfHost + Constants.USER_SEARCH_EXCLUSIONS_KEY, JSON.stringify(merged));
+      const query = this.refs.allDataSearch?.state?.queryString ?? "";
+      this.refs.allDataSearch?.getMatchesDelayed?.(query);
+    });
   }
 
   getUserSearchExclusionsFromLocalStorage() {
-    // Try to read from new MultiCheckboxButtonGroup format first
-    const userSearchExclusions = localStorage.getItem(this.props.sfHost + "_userSearchExclusions");
-    const defaultExclusions = {
-      excludePortalUsersFromSearch: false,
-      excludeInactiveUsersFromSearch: false
-    };
+    const userSearchExclusions = localStorage.getItem(this.props.sfHost + Constants.USER_SEARCH_EXCLUSIONS_KEY);
+    const defaultExclusions = Object.fromEntries(Constants.USER_SEARCH_EXCLUSIONS_CHECKBOXES.map(o => [o.stateKey, false]));
     if (!userSearchExclusions) {
       return defaultExclusions;
     }
     try {
       const parsed = JSON.parse(userSearchExclusions);
-      return {
-        excludePortalUsersFromSearch: parsed.find(cb => cb.name === "portal")?.checked || false,
-        excludeInactiveUsersFromSearch: parsed.find(cb => cb.name === "inactive")?.checked || false
-      };
+      return Object.fromEntries(Constants.USER_SEARCH_EXCLUSIONS_CHECKBOXES.map(o => [o.stateKey, parsed.find(cb => cb.name === o.name)?.checked || false]));
     } catch (e) {
       return defaultExclusions;
     }
@@ -1481,9 +1404,30 @@ class AllDataBoxUsers extends React.PureComponent {
     this.refs.allDataSearch.refs.showAllDataInp.focus();
   }
 
-  componentDidUpdate(prevProps) {
+  componentDidUpdate(prevProps, prevState) {
     if (prevProps.contextUserId !== this.props.contextUserId) {
       this.onDataSelect({Id: this.props.contextUserId});
+    }
+    if (this.state.filterDropdownOpen && !prevState.filterDropdownOpen) {
+      this.documentClickHandler = (e) => {
+        const filterEl = this.refs.filterDropdownRef;
+        if (filterEl && !filterEl.contains(e.target)) {
+          this.setState({filterDropdownOpen: false});
+          document.removeEventListener("mousedown", this.documentClickHandler);
+          this.documentClickHandler = null;
+        }
+      };
+      setTimeout(() => document.addEventListener("mousedown", this.documentClickHandler), 0);
+    } else if (!this.state.filterDropdownOpen && prevState.filterDropdownOpen && this.documentClickHandler) {
+      document.removeEventListener("mousedown", this.documentClickHandler);
+      this.documentClickHandler = null;
+    }
+  }
+
+  componentWillUnmount() {
+    if (this.documentClickHandler) {
+      document.removeEventListener("mousedown", this.documentClickHandler);
+      this.documentClickHandler = null;
     }
   }
 
@@ -1515,7 +1459,7 @@ class AllDataBoxUsers extends React.PureComponent {
     const cacheKey = "userFieldNames";
 
     // Check cache first
-    let fieldNames = DataCache.getCachedData(cacheKey, sfHost);
+    let fieldNames = await DataCache.getCachedData(cacheKey, sfHost);
 
     if (!fieldNames) {
       // Cache expired or missing, fetch fresh data
@@ -1649,37 +1593,40 @@ class AllDataBoxUsers extends React.PureComponent {
   }
 
   resultRender(matches, userQuery) {
-    return matches.map((value) => ({
-      key: value.Id,
-      value,
-      element: [
-        h(
-          "div",
-          {className: "dropdown-item slds-wrap", key: "main"},
-          h(MarkSubstring, {
-            text: value.Name + " (" + value.Alias + ")",
-            start: value.Name.toLowerCase().indexOf(userQuery.toLowerCase()),
-            length: userQuery.length,
-          })
-        ),
-        h(
-          "div",
-          {className: "dropdown-item slds-wrap small", key: "sub"},
-          h("div", {}, value.Profile ? value.Profile.Name : ""),
-          h(MarkSubstring, {
-            text: !value.IsActive ? "⚠ " + value.Username : value.Username,
-            start: value.Username.toLowerCase().indexOf(
-              userQuery.toLowerCase()
-            ),
-            length: userQuery.length,
-          })
-        ),
-      ],
-    }));
+    return matches.map((value, index) => {
+      const itemKey = value.Id || "user-" + index;
+      return {
+        key: itemKey,
+        value,
+        element: [
+          h(
+            "div",
+            {className: "dropdown-item slds-wrap", key: "main-" + itemKey},
+            h(MarkSubstring, {
+              text: value.Name + " (" + value.Alias + ")",
+              start: value.Name.toLowerCase().indexOf(userQuery.toLowerCase()),
+              length: userQuery.length,
+            })
+          ),
+          h(
+            "div",
+            {className: "dropdown-item slds-wrap small", key: "sub-" + itemKey},
+            h("div", {}, value.Profile ? value.Profile.Name : ""),
+            h(MarkSubstring, {
+              text: !value.IsActive ? "⚠ " + value.Username : value.Username,
+              start: value.Username.toLowerCase().indexOf(
+                userQuery.toLowerCase()
+              ),
+              length: userQuery.length,
+            })
+          ),
+        ],
+      };
+    });
   }
 
   render() {
-    let {selectedUser} = this.state;
+    let {selectedUser, filterDropdownOpen, excludePortalUsersFromSearch, excludeInactiveUsersFromSearch} = this.state;
     let {sfHost, linkTarget, contextOrgId, contextUserId, contextPath}
       = this.props;
 
@@ -1696,6 +1643,57 @@ class AllDataBoxUsers extends React.PureComponent {
         inputSearchDelay: 400,
         placeholderText: "Name, username, email or alias",
         resultRender: this.resultRender,
+        rightIcon: h(
+          "div",
+          {
+            ref: "filterDropdownRef",
+            className: "slds-dropdown-trigger slds-dropdown-trigger_click" + (filterDropdownOpen ? " slds-is-open" : ""),
+          },
+          h(
+            "button",
+            {
+              type: "button",
+              className: "sfir-input-filter-btn",
+              title: "Search filters",
+              "aria-haspopup": "true",
+              "aria-expanded": filterDropdownOpen,
+              onClick: this.onFilterToggle,
+            },
+            h(
+              "svg",
+              {className: "sfir-input-filter-icon slds-icon-text-default", "aria-hidden": "true", viewBox: "0 0 520 520"},
+              h("use", {xlinkHref: "symbols.svg#filterList"})
+            )
+          ),
+          filterDropdownOpen && h(
+            "div",
+            {className: "slds-dropdown slds-dropdown_right sfir-user-filter-dropdown"},
+            h("div", {className: "slds-dropdown__header slds-p-horizontal_small slds-p-vertical_x-small slds-text-body_small slds-text-color_weak"}, "Exclude users from search"),
+            h("ul", {className: "slds-dropdown__list", role: "menu"},
+              Constants.USER_SEARCH_EXCLUSIONS_CHECKBOXES.map(option => {
+                const checked = option.stateKey === "excludePortalUsersFromSearch" ? excludePortalUsersFromSearch : excludeInactiveUsersFromSearch;
+                return h(
+                  "li",
+                  {key: option.name, className: "slds-dropdown__item", role: "presentation"},
+                  h(
+                    "div",
+                    {
+                      className: "sfir-filter-checkbox-item" + (checked ? " selected" : ""),
+                      role: "menuitemcheckbox",
+                      "aria-checked": checked,
+                      onClick: (e) => {
+                        e.stopPropagation();
+                        this.onFilterChange(option.name, !checked);
+                      },
+                    },
+                    h("input", {type: "checkbox", checked, readOnly: true, "aria-hidden": "true"}),
+                    option.label.trim()
+                  )
+                );
+              })
+            )
+          )
+        ),
       }),
       h(
         "div",
@@ -1723,9 +1721,19 @@ class AllDataBoxSObject extends React.PureComponent {
     this.state = {
       selectedValue: null,
       recordIdDetails: null,
+      searchQuery: "",
+      searchMatchCount: 0,
     };
     this.onDataSelect = this.onDataSelect.bind(this);
     this.getMatches = this.getMatches.bind(this);
+    this.onMatchingResultsChange = this.onMatchingResultsChange.bind(this);
+  }
+
+  onMatchingResultsChange(matchingResults, userQuery) {
+    this.setState({
+      searchQuery: userQuery || "",
+      searchMatchCount: matchingResults?.length ?? 0,
+    });
   }
 
   componentDidMount() {
@@ -1735,7 +1743,7 @@ class AllDataBoxSObject extends React.PureComponent {
 
   componentDidUpdate(prevProps) {
     let {contextRecordId, sobjectsLoading, contextSobject} = this.props;
-    if (prevProps.contextRecordId !== contextRecordId) {
+    if (prevProps.contextRecordId !== contextRecordId || prevProps.contextSobject !== contextSobject) {
       this.updateSelection(contextRecordId, contextSobject);
     }
     if (prevProps.sobjectsLoading !== sobjectsLoading && !sobjectsLoading) {
@@ -1757,6 +1765,7 @@ class AllDataBoxSObject extends React.PureComponent {
 
   loadRecordIdDetails() {
     let {selectedValue} = this.state;
+    let {sfHost} = this.props;
     //If a recordId is selected and the object supports regularApi
     if (
       selectedValue
@@ -1773,7 +1782,8 @@ class AllDataBoxSObject extends React.PureComponent {
         "LastModifiedDate",
         "Name",
       ];
-      if (selectedValue.sobject.recordTypesSupported && selectedValue.sobject.recordTypesSupported.length > 1) {
+
+      if (selectedValue.sobject.recordTypesSupported && selectedValue.sobject.recordTypesSupported?.recordTypeInfos?.length > 1) {
         fields.push("RecordType.DeveloperName", "RecordType.Id");
       }
       this.restCallForRecordDetails(fields, selectedValue);
@@ -1845,14 +1855,11 @@ class AllDataBoxSObject extends React.PureComponent {
   getBestMatch(query) {
     let {sobjectsList} = this.props;
     // Find the best match based on the record id or object name from the page URL.
-    if (!query) {
-      return null;
-    }
-    if (!sobjectsList) {
+    if (!query || !sobjectsList) {
       return null;
     }
     let sobject = sobjectsList.find(
-      (sobject) => sobject.name.toLowerCase() == query.toLowerCase()
+      (sobject) => (sobject.name || "").toLowerCase() == query.toLowerCase()
     );
     let queryKeyPrefix = query.substring(0, 3);
     if (!sobject) {
@@ -1888,33 +1895,39 @@ class AllDataBoxSObject extends React.PureComponent {
     let res = sobjectsList
       .filter(
         (sobject) =>
-          sobject.name.toLowerCase().includes(query.toLowerCase())
-          || sobject.label.toLowerCase().includes(query.toLowerCase())
+          (sobject.name || "").toLowerCase().includes(query.toLowerCase())
+          || (sobject.label || "").toLowerCase().includes(query.toLowerCase())
           || sobject.keyPrefix == queryKeyPrefix
       )
-      .map((sobject) => ({
-        recordId: null,
-        sobject,
-        // TO-DO: merge with the sortRank function in data-export
-        relevance:
-          (sobject.keyPrefix == queryKeyPrefix
-            ? 2
-            : sobject.name.toLowerCase() == query.toLowerCase()
-              ? 3
-              : sobject.label.toLowerCase() == query.toLowerCase()
-                ? 4
-                : sobject.name.toLowerCase().startsWith(query.toLowerCase())
-                  ? 5
-                  : sobject.label.toLowerCase().startsWith(query.toLowerCase())
-                    ? 6
-                    : sobject.name.toLowerCase().includes("__" + query.toLowerCase())
-                      ? 7
-                      : sobject.name.toLowerCase().includes("_" + query.toLowerCase())
-                        ? 8
-                        : sobject.label.toLowerCase().includes(" " + query.toLowerCase())
-                          ? 9
-                          : 10) + (sobject.availableApis.length == 0 ? 20 : 0),
-      }));
+      .map((sobject) => {
+        let sName = (sobject.name || "").toLowerCase();
+        let sLabel = (sobject.label || "").toLowerCase();
+        let q = query.toLowerCase();
+
+        return {
+          recordId: null,
+          sobject,
+          // TO-DO: merge with the sortRank function in data-export
+          relevance:
+            (sobject.keyPrefix == queryKeyPrefix
+              ? 2
+              : sName == q
+                ? 3
+                : sLabel == q
+                  ? 4
+                  : sName.startsWith(q)
+                    ? 5
+                    : sLabel.startsWith(q)
+                      ? 6
+                      : sName.includes("__" + q)
+                        ? 7
+                        : sName.includes("_" + q)
+                          ? 8
+                          : sLabel.includes(" " + q)
+                            ? 9
+                            : 10) + (sobject.availableApis.length == 0 ? 20 : 0),
+        };
+      });
     query = query || contextRecordId || "";
     queryKeyPrefix = query.substring(0, 3);
     if (query.match(/^([a-zA-Z0-9]{15}|[a-zA-Z0-9]{18})$/)) {
@@ -1928,7 +1941,7 @@ class AllDataBoxSObject extends React.PureComponent {
     res.sort(
       (a, b) =>
         a.relevance - b.relevance
-        || a.sobject.name.localeCompare(b.sobject.name)
+        || (a.sobject.name || "").localeCompare(b.sobject.name || "")
     );
     return res;
   }
@@ -1964,43 +1977,43 @@ class AllDataBoxSObject extends React.PureComponent {
   }
 
   resultRender(matches, userQuery) {
-    return matches.map((value) => ({
-      key: value.recordId + "#" + value.sobject.name,
-      value,
-      element: [
-        h(
-          "div",
-          {className: "dropdown-item slds-wrap", key: "main"},
-          value.recordId
-            || h(MarkSubstring, {
-              text: value.sobject.name,
-              start: value.sobject.name
-                .toLowerCase()
-                .indexOf(userQuery.toLowerCase()),
-              length: userQuery.length,
+    let qLower = (userQuery || "").toLowerCase();
+    return matches.map((value, index) => {
+      const itemKey = value.recordId + "#" + value.sobject.name + "#" + index;
+      return {
+        key: itemKey,
+        value,
+        element: [
+          h(
+            "div",
+            {className: "dropdown-item slds-wrap", key: "main-" + itemKey},
+            value.recordId
+              || h(MarkSubstring, {
+                text: value.sobject.name || "",
+                start: (value.sobject.name || "").toLowerCase().indexOf(qLower),
+                length: userQuery.length,
+              }),
+            value.sobject.availableApis.length == 0 ? " (Not readable)" : ""
+          ),
+          h(
+            "div",
+            {className: "dropdown-item slds-wrap", key: "sub-" + itemKey},
+            h(MarkSubstring, {
+              text: value.sobject.keyPrefix || "---",
+              start:
+                value.sobject.keyPrefix == userQuery.substring(0, 3) ? 0 : -1,
+              length: 3,
             }),
-          value.sobject.availableApis.length == 0 ? " (Not readable)" : ""
-        ),
-        h(
-          "div",
-          {className: "dropdown-item slds-wrap", key: "sub"},
-          h(MarkSubstring, {
-            text: value.sobject.keyPrefix || "---",
-            start:
-              value.sobject.keyPrefix == userQuery.substring(0, 3) ? 0 : -1,
-            length: 3,
-          }),
-          " • ",
-          h(MarkSubstring, {
-            text: value.sobject.label,
-            start: value.sobject.label
-              .toLowerCase()
-              .indexOf(userQuery.toLowerCase()),
-            length: userQuery.length,
-          })
-        ),
-      ],
-    }));
+            " • ",
+            h(MarkSubstring, {
+              text: value.sobject.label || "",
+              start: (value.sobject.label || "").toLowerCase().indexOf(qLower),
+              length: userQuery.length,
+            })
+          ),
+        ],
+      };
+    });
   }
 
   render() {
@@ -2013,7 +2026,10 @@ class AllDataBoxSObject extends React.PureComponent {
       isFieldsPresent,
       eventMonitorHref,
     } = this.props;
-    let {selectedValue, recordIdDetails} = this.state;
+    let {selectedValue, recordIdDetails, searchQuery, searchMatchCount} = this.state;
+    let {onClearSobjectsCache} = this.props;
+    const cacheEnabled = isSettingEnabled(Constants.ENABLE_SOBJECTS_LIST_CACHE, true);
+    const showClearCacheButton = cacheEnabled && searchQuery.trim().length > 0 && searchMatchCount === 0;
     return h(
       "div",
       {className: "tab-container slds-p-horizontal_x-small"},
@@ -2021,6 +2037,7 @@ class AllDataBoxSObject extends React.PureComponent {
         ref: "allDataSearch",
         sfHost,
         onDataSelect: this.onDataSelect,
+        onMatchingResultsChange: this.onMatchingResultsChange,
         sobjectsList,
         getMatches: this.getMatches,
         inputSearchDelay: 0,
@@ -2347,15 +2364,34 @@ class AllDataBoxSObject extends React.PureComponent {
                 )
               )
             ),
-            h(
-              "div",
-              {className: "slds-text-longform"},
-              h(
-                "h3",
-                {className: "slds-text-body_regular"},
-                "No record to display"
+            showClearCacheButton
+              ? h(
+                "div",
+                {className: "slds-text-longform slds-m-top_small slds-m-bottom_small"},
+                h(
+                  "p",
+                  {className: "slds-text-body_regular slds-m-bottom_xx-small"},
+                  "No matching objects found. Clear the cache to refresh the list and include newly created objects."
+                ),
+                h(
+                  "button",
+                  {
+                    className: "slds-button slds-button_neutral",
+                    onClick: onClearSobjectsCache,
+                    title: "Clear SObjects List cache and refresh"
+                  },
+                  "Clear Cache"
+                )
               )
-            )
+              : h(
+                "div",
+                {className: "slds-text-longform"},
+                h(
+                  "h3",
+                  {className: "slds-text-body_regular"},
+                  "No record to display"
+                )
+              )
           )
         )
     );
@@ -2373,10 +2409,85 @@ class AllDataBoxShortcut extends React.PureComponent {
     this.getMatches = this.getMatches.bind(this);
     this.onDataSelect = this.onDataSelect.bind(this);
     this.onAddShortcut = this.onAddShortcut.bind(this);
+    this.resultRender = this.resultRender.bind(this);
   }
 
   componentDidMount() {
     this.refs.allDataSearch.refs.showAllDataInp.focus();
+  }
+
+  /**
+   * Parse Shortcut tab query prefixes:
+   * - "/term" → setup links only
+   * - "!term" → all metadata types
+   * - "!flow term" / "!profile term" / "!class term" / "!perm term" → one metadata type
+   * - "term" → setup links + metadata (default)
+   */
+  parseShortcutSearch(shortcutSearch) {
+    const METADATA_TYPE_ALIASES = {
+      flow: "flows",
+      profile: "profiles",
+      class: "classes",
+      perm: "permissionSets"
+    };
+    const ALL_METADATA_TYPES = [
+      "flows",
+      "profiles",
+      "permissionSets",
+      "classes",
+    ];
+
+    if (shortcutSearch.startsWith("/")) {
+      return {
+        includeLinks: true,
+        includeMetadata: false,
+        metadataTypes: [],
+        query: shortcutSearch.slice(1).trim(),
+      };
+    }
+
+    if (shortcutSearch.startsWith("!")) {
+      const rest = shortcutSearch.slice(1).trim();
+      const typeMatch = rest.match(/^([a-zA-Z]+)\s+(.*)$/);
+      if (typeMatch) {
+        const alias = METADATA_TYPE_ALIASES[typeMatch[1].toLowerCase()];
+        if (alias) {
+          return {
+            includeLinks: false,
+            includeMetadata: true,
+            metadataTypes: [alias],
+            query: typeMatch[2].trim(),
+            forceMetadata: true,
+          };
+        }
+      }
+      const singleType = METADATA_TYPE_ALIASES[rest.toLowerCase()];
+      if (singleType) {
+        // "!profile" with no search term yet
+        return {
+          includeLinks: false,
+          includeMetadata: true,
+          metadataTypes: [singleType],
+          query: "",
+          forceMetadata: true,
+        };
+      }
+      return {
+        includeLinks: false,
+        includeMetadata: true,
+        metadataTypes: ALL_METADATA_TYPES,
+        query: rest,
+        forceMetadata: true,
+      };
+    }
+
+    return {
+      includeLinks: true,
+      includeMetadata: true,
+      metadataTypes: null, // use options
+      query: shortcutSearch,
+      forceMetadata: false,
+    };
   }
 
   async getMatches(shortcutSearch) {
@@ -2385,19 +2496,33 @@ class AllDataBoxShortcut extends React.PureComponent {
       return [];
     }
     try {
-      setIsLoading(true);
       shortcutSearch = shortcutSearch.trim();
+      const {
+        includeLinks,
+        includeMetadata,
+        metadataTypes,
+        query,
+        forceMetadata,
+      } = this.parseShortcutSearch(shortcutSearch);
 
-      //search for shortcuts
-      let result = setupLinks.filter((item) =>
-        item.label.toLowerCase().includes(shortcutSearch.toLowerCase())
-      );
-      result.forEach((element) => {
-        element.detail = element.section;
-        element.name = element.link;
-        element.Id = element.name;
-        element.isSetupLink = true;
-      });
+      if (!query) {
+        return [];
+      }
+
+      let result = [];
+
+      //search for setup / custom shortcuts
+      if (includeLinks) {
+        result = setupLinks.filter((item) =>
+          item.label.toLowerCase().includes(query.toLowerCase())
+        );
+        result.forEach((element) => {
+          element.detail = element.section;
+          element.name = element.link;
+          element.Id = element.name;
+          element.isSetupLink = true;
+        });
+      }
 
       let metadataShortcutSearchOptions = localStorage.getItem(
         "metadataShortcutSearchOptions"
@@ -2414,131 +2539,136 @@ class AllDataBoxShortcut extends React.PureComponent {
           != undefined;
       }
 
-      //search for metadata if user did not disabled it
-      if (metadataShortcutSearch) {
+      // Explicit ! prefix always searches metadata; otherwise respect options
+      const canSearchMetadata
+        = includeMetadata
+        && query.length >= 2
+        && (forceMetadata || metadataShortcutSearch);
+
+      //search for metadata if enabled (min 2 chars to avoid heavy queries)
+      if (canSearchMetadata) {
+        setIsLoading(true);
         const queries = {
           flows:
             "SELECT DurableId, LatestVersionId, ApiName, Label, ProcessType FROM FlowDefinitionView WHERE Label LIKE '%"
-            + shortcutSearch
-            + "%' LIMIT 30",
+            + query
+            + "%' LIMIT 15",
           profiles:
             "SELECT Id, Name, UserLicense.Name FROM Profile WHERE Name LIKE '%"
-            + shortcutSearch
-            + "%' LIMIT 30",
+            + query
+            + "%' LIMIT 15",
           permissionSets:
             "SELECT Id, Name, Label, Type, LicenseId, License.Name, PermissionSetGroupId FROM PermissionSet WHERE Label LIKE '%"
-            + shortcutSearch
-            + "%' LIMIT 30",
-          networks:
-            "SELECT NetworkId, Network.Name, Network.Status, Network.UrlPathPrefix, SiteId FROM WebStoreNetwork WHERE Network.Name LIKE '%"
-            + shortcutSearch
-            + "%' LIMIT 50",
+            + query
+            + "%' LIMIT 15",
           classes:
             "SELECT Id, Name, NamespacePrefix, ApiVersion, Status, LengthWithoutComments FROM ApexClass WHERE Name LIKE '%"
-            + shortcutSearch
-            + "%' LIMIT 50",
+            + query
+            + "%' LIMIT 20",
         };
         // If metadataShortcutSearchOptions is null, assume all options are checked
         const defaultOptions = [
           "flows",
           "profiles",
           "permissionSets",
-          "networks",
           "classes",
         ].map((name) => ({name, checked: true}));
         const effectiveOptions
           = metadataShortcutSearchOptions || defaultOptions;
 
-        const compositeRequest = effectiveOptions
-          .filter((setting) => setting.checked)
-          .map((setting) => ({
+        let typesToQuery;
+        if (metadataTypes) {
+          // Prefix selected specific types (or all for bare "!")
+          typesToQuery = metadataTypes.filter((name) => queries[name]);
+        } else {
+          typesToQuery = effectiveOptions
+            .filter((setting) => setting.checked && queries[setting.name])
+            .map((setting) => setting.name);
+        }
+
+        if (typesToQuery.length > 0) {
+          const compositeRequest = typesToQuery.map((name) => ({
             method: "GET",
             url:
               "/services/data/v"
               + apiVersion
               + "/query/?q="
-              + encodeURIComponent(queries[setting.name]),
-            referenceId: setting.name + "Select",
+              + encodeURIComponent(queries[name]),
+            referenceId: name + "Select",
           }));
 
-        const searchResult = await sfConn.rest(
-          "/services/data/v" + apiVersion + "/composite",
-          {method: "POST", body: {compositeRequest}}
-        );
-        let results = searchResult.compositeResponse.filter(
-          (elm) => elm.httpStatusCode == 200 && elm.body.records.length > 0
-        );
+          const searchResult = await sfConn.rest(
+            "/services/data/v" + apiVersion + "/composite",
+            {method: "POST", body: {compositeRequest}}
+          );
+          let results = searchResult.compositeResponse.filter(
+            (elm) => elm.httpStatusCode == 200 && elm.body.records.length > 0
+          );
 
-        let enablePermSetSummary
-          = localStorage.getItem("enablePermSetSummary") === "true";
+          let enablePermSetSummary
+            = localStorage.getItem("enablePermSetSummary") === "true";
 
-        results.forEach((element) => {
-          element.body.records.forEach((rec) => {
-            if (rec.attributes.type === "FlowDefinitionView") {
-              rec.link
-                = "/builder_platform_interaction/flowBuilder.app?flowDefId="
-                + rec.DurableId
-                + "&flowId="
-                + rec.LatestVersionId;
-              rec.label = rec.Label;
-              rec.name = rec.ApiName;
-              rec.detail = rec.attributes.type + " • " + rec.ProcessType;
-            } else if (rec.attributes.type === "Profile") {
-              rec.link
-                = "/lightning/setup/EnhancedProfiles/page?address=%2F" + rec.Id;
-              rec.label = rec.Name;
-              rec.name = rec.Id;
-              rec.detail = rec.attributes.type + " • " + rec.UserLicense.Name;
-            } else if (rec.attributes.type === "PermissionSet") {
-              rec.label = rec.Label;
-              rec.name = rec.Name;
-              rec.detail = rec.attributes.type + " • " + rec.Type;
-              rec.detail
-                += rec.License?.Name != null ? " • " + rec.License?.Name : "";
+          results.forEach((element) => {
+            element.body.records.forEach((rec) => {
+              if (rec.attributes.type === "FlowDefinitionView") {
+                rec.link
+                  = "/builder_platform_interaction/flowBuilder.app?flowDefId="
+                  + rec.DurableId
+                  + "&flowId="
+                  + rec.LatestVersionId;
+                rec.label = rec.Label;
+                rec.name = rec.ApiName;
+                rec.detail = rec.attributes.type + " • " + rec.ProcessType;
+              } else if (rec.attributes.type === "Profile") {
+                rec.link
+                  = "/lightning/setup/EnhancedProfiles/page?address=%2F" + rec.Id;
+                rec.label = rec.Name;
+                rec.name = rec.Id;
+                rec.detail = rec.attributes.type + " • " + rec.UserLicense.Name;
+              } else if (rec.attributes.type === "PermissionSet") {
+                rec.label = rec.Label;
+                rec.name = rec.Name;
+                rec.detail = rec.attributes.type + " • " + rec.Type;
+                rec.detail
+                  += rec.License?.Name != null ? " • " + rec.License?.Name : "";
 
-              const isGroup = rec.Type === "Group";
-              let psetOrGroupId = isGroup ? rec.PermissionSetGroupId : rec.Id;
-              let type = isGroup ? "PermSetGroups" : "PermSets";
-              let endLink = enablePermSetSummary
-                ? psetOrGroupId + "/summary"
-                : "page?address=%2F" + psetOrGroupId;
-              rec.link = "/lightning/setup/" + type + "/" + endLink;
-            } else if (rec.attributes.type === "ApexClass") {
-              rec.link
-                = "/lightning/setup/ApexClasses/page?address=%2F" + rec.Id;
-              rec.label = rec.Name;
-              rec.name = rec.NamespacePrefix
-                ? rec.NamespacePrefix + "__" + rec.Name
-                : rec.Name;
-              rec.detail
-                = rec.attributes.type
-                + " • "
-                + rec.ApiVersion
-                + ".0 • "
-                + rec.Status
-                + (rec.NamespacePrefix
-                  ? ""
-                  : " • Length: " + rec.LengthWithoutComments);
-            } else if (rec.attributes.type === "WebStoreNetwork") {
-              rec.link = `/sfsites/picasso/core/config/commeditor.jsp?servlet%2Fnetworks%2Fswitch%3FnetworkId%3D${rec.NetworkId}%26startURL%3D%252FcommunitySetup%252FcwApp.app%2523%252Fc%252Fhome&siteId=${rec.SiteId}&`;
-              rec.label = rec.Network.Name;
-              let url = rec.Network.UrlPathPrefix
-                ? " • /" + rec.Network.UrlPathPrefix
-                : "";
-              rec.name = rec.NetworkId + url;
-              rec.detail = "Network (" + rec.Network.Status + ") • Builder";
-            }
-            rec.title = rec.name;
-            result.push(rec);
+                const isGroup = rec.Type === "Group";
+                let psetOrGroupId = isGroup ? rec.PermissionSetGroupId : rec.Id;
+                let type = isGroup ? "PermSetGroups" : "PermSets";
+                let endLink = enablePermSetSummary
+                  ? psetOrGroupId + "/summary"
+                  : "page?address=%2F" + psetOrGroupId;
+                rec.link = "/lightning/setup/" + type + "/" + endLink;
+              } else if (rec.attributes.type === "ApexClass") {
+                rec.link
+                  = "/lightning/setup/ApexClasses/page?address=%2F" + rec.Id;
+                rec.label = rec.Name;
+                rec.name = rec.NamespacePrefix
+                  ? rec.NamespacePrefix + "__" + rec.Name
+                  : rec.Name;
+                rec.detail
+                  = rec.attributes.type
+                  + " • "
+                  + rec.ApiVersion
+                  + ".0 • "
+                  + rec.Status
+                  + (rec.NamespacePrefix
+                    ? ""
+                    : " • Length: " + rec.LengthWithoutComments);
+              }
+              rec.title = rec.name;
+              result.push(rec);
+            });
           });
-        });
+        }
       }
       //if no result found, add the global search link
       result.length > 0
         ? result
         : result.push({
-          link: "/one/one.app#" + this.getEncodedGlobalSearch(shortcutSearch),
-          label: '"' + shortcutSearch + '"',
+          Id: "global-search-" + query,
+          link: "/one/one.app#" + this.getEncodedGlobalSearch(query),
+          label: '"' + query + '"',
           detail: "No results found",
           name: "Use Global Search",
         });
@@ -2575,8 +2705,10 @@ class AllDataBoxShortcut extends React.PureComponent {
   }
 
   resultRender(matches, shortcutQuery) {
-    return matches.map((value) => ({
-      key: value.Id,
+    const {query} = this.parseShortcutSearch((shortcutQuery || "").trim());
+    const highlightQuery = query || shortcutQuery || "";
+    return matches.map((value, index) => ({
+      key: value.Id || "shortcut-" + index,
       value,
       element: [
         h(
@@ -2584,14 +2716,14 @@ class AllDataBoxShortcut extends React.PureComponent {
           {
             className: "dropdown-item slds-wrap",
             title: value.title,
-            key: "main" + value.Id,
+            key: "main-" + (value.Id || index),
           },
           h(MarkSubstring, {
             text: value.label,
             start: value.label
               .toLowerCase()
-              .indexOf(shortcutQuery.toLowerCase()),
-            length: shortcutQuery.length,
+              .indexOf(highlightQuery.toLowerCase()),
+            length: highlightQuery.length,
           })
         ),
         h(
@@ -2599,15 +2731,15 @@ class AllDataBoxShortcut extends React.PureComponent {
           {
             className: "dropdown-item slds-wrap small",
             title: value.title,
-            key: "sub" + value.Id,
+            key: "sub-" + (value.Id || index),
           },
           h("div", {}, value.detail),
           h(MarkSubstring, {
             text: value.name,
             start: value.name
               .toLowerCase()
-              .indexOf(shortcutQuery.toLowerCase()),
-            length: shortcutQuery.length,
+              .indexOf(highlightQuery.toLowerCase()),
+            length: highlightQuery.length,
           })
         ),
       ],
@@ -2630,7 +2762,7 @@ class AllDataBoxShortcut extends React.PureComponent {
         getMatches: this.getMatches,
         onDataSelect: this.onDataSelect,
         inputSearchDelay: 200,
-        placeholderText: "Quick find links, shortcuts",
+        placeholderText: "Search… /links !perm !flow !profile !class",
         resultRender: this.resultRender,
         sfHost,
         icon: "add",
@@ -2684,14 +2816,17 @@ class AllDataBoxOrg extends React.PureComponent {
 
   getNextMajorRelease(maintenances) {
     if (maintenances) {
-      let event = maintenances.find((event) =>
-        event.name.endsWith("Major Release")
+      let event = maintenances.find((e) =>
+        e && e.name && e.name.endsWith("Major Release")
       );
-      return (
-        event.name.replace(" Major Release", "")
-        + " on "
-        + new Date(event.plannedStartTime).toDateString()
-      );
+
+      if (event) {
+        return (
+          event.name.replace(" Major Release", "")
+          + " on "
+          + new Date(event.plannedStartTime).toDateString()
+        );
+      }
     }
     return null;
   }
@@ -2932,9 +3067,11 @@ class AllDataBoxOrg extends React.PureComponent {
                 h(
                   "td",
                   {},
-                  this.getNextMajorRelease(
-                    this.state.instanceStatus?.Maintenances
-                  )
+                  this.state.instanceStatus
+                    ? this.getNextMajorRelease(
+                      this.state.instanceStatus.Maintenances
+                    ) || "None scheduled"
+                    : ""
                 )
               )
             )
@@ -2983,7 +3120,7 @@ class UserDetails extends React.PureComponent {
         type: "success",
         bannerText: operation,
         iconName: "success",
-        assistiveTest: `${operation} completed successfully`,
+        assistiveText: `${operation} completed successfully`,
         link: link || {
           text: message || `${operation} completed successfully`,
         },
@@ -2998,7 +3135,7 @@ class UserDetails extends React.PureComponent {
         type: "error",
         bannerText: `${operation} Failed`,
         iconName: "error",
-        assistiveTest: `Failed to ${operation.toLowerCase()}`,
+        assistiveText: `Failed to ${operation.toLowerCase()}`,
         link: message ? {
           text: message,
         } : {
@@ -3238,8 +3375,7 @@ class UserDetails extends React.PureComponent {
     let {currentUserId} = this.props;
     //Optimistically show login unless it's logged in user's userid or user is inactive.
     //No API to determine if user is allowed to login as given user. See https://salesforce.stackexchange.com/questions/224342/query-can-i-login-as-for-users
-    const isFrozen = !!user?.UserLogins?.records?.[0]?.IsFrozen;
-    if (!user || user.Id == currentUserId || !user.IsActive || isFrozen) {
+    if (!user || user.Id == currentUserId || !user.IsActive) {
       return false;
     }
     return true;
@@ -3899,6 +4035,7 @@ class AllDataSelection extends React.PureComponent {
   }
   getFlowScannerUrl() {
     return `flow-scanner.html?host=${this.props.sfHost}&flowDefId=${this.state.flowDefinitionId}&flowId=${this.props.selectedValue.recordId}`;
+
   }
   getFlowCompareUrl() {
     return getFlowCompareUrl(this.props.sfHost, this.props.selectedValue.recordId);
@@ -4026,6 +4163,9 @@ class AllDataSelection extends React.PureComponent {
   getSubscribeUrl(name) {
     return this.props.eventMonitorHref + "&channel=" + name;
   }
+  getGenerateEventUrl(name) {
+    return this.props.eventMonitorHref + "&channel=" + name + "&generate=1";
+  }
   setFlowDefinitionId(recordId) {
     if (recordId && !this.state.flowDefinitionId) {
       if (recordId.startsWith("301")) {
@@ -4085,7 +4225,7 @@ class AllDataSelection extends React.PureComponent {
             "article",
             {
               className:
-                "slds-card slds-card_boundary slds-p-horizontal_small slds-p-vertical_xx-small sfir-background-grey",
+                "slds-card slds-card_boundary slds-p-horizontal_small slds-p-vertical_x-small sfir-background-grey",
             },
             h(
               "div",
@@ -4367,14 +4507,26 @@ class AllDataSelection extends React.PureComponent {
         : null,
       selectedValue.sobject.name.endsWith("__e")
         ? h(
-          "a",
-          {
-            href: this.getSubscribeUrl(selectedValue.sobject.name),
-            target: linkTarget,
-            className:
-                "slds-button slds-button_neutral slds-m-top_xx-small page-button slds-button slds-button_neutral",
-          },
-          h("span", {}, h("u", {}), "Subscribe to Event")
+          "div",
+          {className: "slds-button-group slds-m-top_xx-small", role: "group"},
+          h(
+            "a",
+            {
+              href: this.getSubscribeUrl(selectedValue.sobject.name),
+              target: linkTarget,
+              className: "slds-button slds-button_neutral page-button",
+            },
+            h("span", {}, h("u", {}), "Subscribe Event")
+          ),
+          h(
+            "a",
+            {
+              href: this.getGenerateEventUrl(selectedValue.sobject.name),
+              target: linkTarget,
+              className: "slds-button slds-button_neutral page-button",
+            },
+            h("span", {}, "Generate Event")
+          )
         )
         : null
     );
@@ -4514,8 +4666,10 @@ class AllDataSearch extends React.PureComponent {
       queryString: "",
       matchingResults: [],
       recentItems: [],
-      queryDelayTimer: null,
+      searchLoading: false,
     };
+    this.queryDelayTimerRef = {current: null};
+    this.searchGeneration = 0;
     this.onAllDataInput = this.onAllDataInput.bind(this);
     this.onAllDataFocus = this.onAllDataFocus.bind(this);
     this.onAllDataBlur = this.onAllDataBlur.bind(this);
@@ -4559,28 +4713,38 @@ class AllDataSearch extends React.PureComponent {
     }
   }
   getMatchesDelayed(userQuery) {
-    let {queryDelayTimer} = this.state;
-    let {inputSearchDelay} = this.props;
+    let {inputSearchDelay, onMatchingResultsChange} = this.props;
+    const timerRef = this.queryDelayTimerRef;
 
-    if (queryDelayTimer) {
-      clearTimeout(queryDelayTimer);
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
     }
-    queryDelayTimer = setTimeout(async () => {
-      let {getMatches} = this.props;
-      const matchingResults = await getMatches(userQuery);
-      await this.setState({matchingResults});
+    timerRef.current = setTimeout(async () => {
+      timerRef.current = null;
+      const generation = ++this.searchGeneration;
+      this.setState({searchLoading: true});
+      try {
+        let {getMatches} = this.props;
+        const matchingResults = await getMatches(userQuery);
+        if (generation !== this.searchGeneration) {
+          return;
+        }
+        await this.setState({matchingResults});
+        onMatchingResultsChange?.(matchingResults, userQuery);
+      } finally {
+        this.setState({searchLoading: false});
+      }
     }, inputSearchDelay);
-
-    this.setState({queryDelayTimer});
   }
   render() {
-    let {queryString, matchingResults, recentItems} = this.state;
-    let {placeholderText, resultRender, sfHost} = this.props;
+    let {queryString, matchingResults, recentItems, searchLoading} = this.state;
+    let {placeholderText, resultRender, sfHost, rightIcon} = this.props;
     return h(
       "div",
       {
         className:
-          "input-with-dropdown slds-form-element__control slds-grow slds-input-has-icon slds-input-has-icon_left-right",
+          "input-with-dropdown slds-form-element__control slds-grow slds-input-has-icon "
+          + (rightIcon ? "slds-input-has-icon_left-right sfir-has-right-icon" : "slds-input-has-icon_right"),
       },
       h("input", {
         className: "slds-input sfir-font-size_11px",
@@ -4600,21 +4764,42 @@ class AllDataSearch extends React.PureComponent {
         queryString,
         sfHost,
       }),
-      h(
-        "svg",
-        {
-          className:
-            "slds-input__icon slds-input__icon_left slds-icon-text-default",
-          viewBox: "0 0 520 520",
-          onClick: this.onAllDataArrowClick,
-        },
-        h(
-          "g",
-          {},
-          h("path", {
-            d: "M496 453L362 320a189 189 0 10-340-92 190 190 0 00298 135l133 133a14 14 0 0021 0l21-21a17 17 0 001-22zM210 338a129 129 0 11130-130 129 129 0 01-130 130z",
-          })
+      searchLoading
+        ? h(
+          "div",
+          {
+            className: "slds-input__icon slds-input__icon_left sfir-search-spinner",
+            "aria-hidden": "true",
+          },
+          h("div", {
+            role: "status",
+            className: "slds-spinner slds-spinner_small slds-spinner_brand",
+            "aria-label": "Searching",
+          }, [
+            h("div", {key: "dot-a", className: "slds-spinner__dot-a"}),
+            h("div", {key: "dot-b", className: "slds-spinner__dot-b"}),
+          ])
         )
+        : h(
+          "svg",
+          {
+            className:
+              "slds-input__icon slds-input__icon_left slds-icon-text-default",
+            viewBox: "0 0 520 520",
+            onClick: this.onAllDataArrowClick,
+          },
+          h(
+            "g",
+            {},
+            h("path", {
+              d: "M496 453L362 320a189 189 0 10-340-92 190 190 0 00298 135l133 133a14 14 0 0021 0l21-21a17 17 0 001-22zM210 338a129 129 0 11130-130 129 129 0 01-130 130z",
+            })
+          )
+        ),
+      rightIcon && h(
+        "div",
+        {className: "slds-input__icon slds-input__icon_right sfir-input-right-icon"},
+        rightIcon
       )
     );
   }
@@ -4659,11 +4844,12 @@ class Autocomplete extends React.PureComponent {
   }
   handleFocus() {
     let {recentItems} = this.props;
+    if (!isSettingEnabled(Constants.ENABLE_RECENTLY_VIEWED_RECORDS, true)) {
+      return;
+    }
     sfConn
       .rest(
-        "/services/data/v"
-          + apiVersion
-          + "/query/?q=SELECT+Id,Name,Type+FROM+RecentlyViewed+LIMIT+100"
+        `/services/data/v${apiVersion}/query/?q=SELECT+Id,Name,Type+FROM+RecentlyViewed+WHERE+Type!='ListView'+LIMIT+${RECENT_ITEMS_RENDERED_COUNT}`
       )
       .then((res) => {
         let itemsIds = new Set();
@@ -4859,20 +5045,15 @@ class Autocomplete extends React.PureComponent {
       itemHeight,
       resultsMouseIsDown,
     } = this.state;
-    // For better performance only render the visible autocomplete items + at least one invisible item above and below (if they exist)
-    const RENDERED_ITEMS_COUNT = 11;
-    let firstIndex = 0;
+
     let autocompleteResults
       = recentItems.length > 0 ? recentItems : matchingResults;
     let lastIndex = autocompleteResults.length - 1;
     let firstRenderedIndex = Math.max(0, scrollTopIndex - 2);
     let lastRenderedIndex = Math.min(
       lastIndex,
-      firstRenderedIndex + RENDERED_ITEMS_COUNT
+      firstRenderedIndex + RECENT_ITEMS_RENDERED_COUNT
     );
-    let topSpace = (firstRenderedIndex - firstIndex) * itemHeight;
-    let bottomSpace = (lastIndex - lastRenderedIndex) * itemHeight;
-    let topSelected = (selectedIndex - firstIndex) * itemHeight;
 
     return h(
       "div",
@@ -4901,11 +5082,11 @@ class Autocomplete extends React.PureComponent {
             h(
               "div",
               {
-                key,
+                key: key || "result-" + (firstRenderedIndex + index),
                 className:
-                  "slds-dropdown__item "
+                  "slds-dropdown__item autocomplete-item "
                   + (selectedIndex == index + firstRenderedIndex
-                    ? "selected-old"
+                    ? "selected"
                     : ""),
                 onClick: (e) => this.onResultClick(e, value),
                 onMouseEnter: () =>
@@ -4928,6 +5109,24 @@ function getRecordId(href) {
     const flowId = url.searchParams.get("flowId");
     if (flowId && flowId.startsWith("301")) {
       return flowId;
+    }
+  }
+
+  // Lightning Setup pages with address parameter
+  if (url.pathname.startsWith("/lightning/setup/")) {
+    const addressParam = url.searchParams.get("address");
+    if (addressParam) {
+      try {
+        // Decode the URL-encoded address parameter
+        const decodedAddress = decodeURIComponent(addressParam);
+        const match = decodedAddress.match(/^\/([a-zA-Z0-9]{15,18})(?:\?|$)/);
+        if (match && isRecordId(match[1])) {
+          return match[1];
+        }
+      } catch (e) {
+        // If decoding fails, continue to other checks
+        console.warn("Failed to decode address parameter:", e);
+      }
     }
   }
 
@@ -5027,9 +5226,15 @@ function sfLocaleKeyToCountryCode(localeKey) {
     return "";
   }
   const splitted = localeKey.split("_");
-  return splitted[
+  const code = splitted[
     splitted.length > 1 && !localeKey.includes("_LATN_") ? 1 : 0
   ].toLowerCase();
+  // Languages without their own ISO 3166 country code: Catalan (ca) and Basque (eu), added in Salesforce Summer '26
+  const regionalFlags = {ca: "catalonia", eu: "basque"};
+  if (splitted.length === 1 && regionalFlags[code]) {
+    return regionalFlags[code];
+  }
+  return code;
 }
 
 window.getRecordId = getRecordId; // for unit tests

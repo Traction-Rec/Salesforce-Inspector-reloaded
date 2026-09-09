@@ -1,7 +1,7 @@
 import {sfConn, apiVersion, XML} from "./inspector.js";
 import Toast from "./components/Toast.js";
 import {PageHeader} from "./components/PageHeader.js";
-import {UserInfoModel, createSpinForMethod, copyToClipboard} from "./utils.js";
+import {UserInfoModel, createSpinForMethod, copyToClipboard, generatePackageXml} from "./utils.js";
 import ConfirmModal from "./components/ConfirmModal.js";
 import {Spinner} from "./components/Spinner.js";
 
@@ -24,7 +24,7 @@ class Model {
     this.metadataObjects = [];
     this.metadataTypeMap = {}; // Map of xmlName to metadata object with suffix
     this.includeManagedPackage = localStorage.getItem("includeManagedMetadata") === "true";
-    this.sortMetadataBy = JSON.parse(localStorage.getItem("sortMevetadataBy")) || "fullName";
+    this.sortMetadataBy = JSON.parse(localStorage.getItem("sortMetadataBy")) || "fullName";
     this.packageXml;
     this.metadataFilter = "";
     this.deployRequestId;
@@ -174,19 +174,35 @@ class Model {
     });
   }
 
-  retrieveMetaFromPackageXml(packageXml){
+  parsePackageXml(packageXml) {
     const parser = new DOMParser();
     const xmlDoc = parser.parseFromString(packageXml, "text/xml");
-
     const retrieveRequest = {apiVersion, unpackaged: {types: []}};
 
     const types = xmlDoc.getElementsByTagName("types");
     for (let typeNode of types) {
-      const name = typeNode.getElementsByTagName("name")[0].textContent;
+      const nameNode = typeNode.getElementsByTagName("name")[0];
+      if (!nameNode) continue;
+      const name = nameNode.textContent;
       const members = [...typeNode.getElementsByTagName("members")].map(m => m.textContent).sort();
       retrieveRequest.unpackaged.types.push({name, members});
     }
     retrieveRequest.unpackaged.types.sort((a, b) => a.name.localeCompare(b.name));
+
+    if (this.metadataObjects && this.metadataObjects.length > 0) {
+      const typeNames = retrieveRequest.unpackaged.types.map(t => t.name);
+      this.metadataObjects.forEach(obj => {
+        if (typeNames.includes(obj.xmlName)) {
+          obj.selected = true;
+        }
+      });
+    }
+
+    return retrieveRequest;
+  }
+
+  retrieveMetaFromPackageXml(packageXml) {
+    const retrieveRequest = this.parsePackageXml(packageXml);
     this.retrieveMetadata(retrieveRequest);
   }
 
@@ -326,18 +342,12 @@ class Model {
         });
       }
     });
-    this.packageXml = "<Package xmlns=\"http://soap.sforce.com/2006/04/metadata\">\n";
-
-    Object.entries(groupedComponents).forEach(([type, members]) => {
-      this.packageXml += "    <types>\n";
-      [...members].sort().forEach(member => {
-        this.packageXml += `        <members>${member}</members>\n`;
-      });
-      this.packageXml += `        <name>${type}</name>\n`;
-      this.packageXml += "    </types>\n";
+    // Generate the package.xml using shared utility
+    this.packageXml = generatePackageXml(groupedComponents, {
+      includeXmlDeclaration: false,
+      sortTypes: false,
+      skipEmptyTypes: false
     });
-    this.packageXml += `    <version>${apiVersion}</version>\n`;
-    this.packageXml += "</Package>";
   }
 
   formatXml(xmlString) {
@@ -648,6 +658,8 @@ class App extends React.Component {
         try {
           const importedPackage = event.target.result;
           model.packageXml = importedPackage;
+          model.parsePackageXml(importedPackage);
+
           this.setState({
             showToast: true,
             toastMessage: fileName + " imported successfully!",
@@ -783,7 +795,7 @@ class App extends React.Component {
     let {model} = this.props;
     let clipText = e.clipboardData.getData("text/plain");
     model.packageXml = clipText;
-    model.retrieveMetaFromPackageXml(clipText);
+    model.parsePackageXml(clipText);
     model.didUpdate();
   }
   onUpdateManagedPackageSelection(e){
@@ -974,7 +986,8 @@ class App extends React.Component {
           confirmLabel: "Download",
           confirmIconName: "symbols.svg#download",
           cancelLabel: "Close",
-          children: h("div", {style: {maxHeight: "60vh", overflow: "auto"}},
+          modalSize: "large",
+          children: h("div", {className: "slds-scrollable_y"},
             h("pre", {className: "reset-margin"},
               h("code", {
                 id: "metadata-xml-content",
@@ -1050,10 +1063,21 @@ class App extends React.Component {
                 onClick: this.onStartClick,
                 disabled: !model.deployRequestId && (!model.metadataObjects || !model.metadataObjects.some(obj => obj.selected))
               }, "Retrieve Metadata"),
-              model.statusLink ? h("button", {className: "slds-button slds-button_icon slds-button_icon-border-filled slds-m-left_x-small", onClick: () => this.refs.fileInput.click(), title: "Save status info"},
-                h("svg", {className: "slds-button__icon"},
-                  h("use", {xlinkHref: "symbols.svg#info"})
-                )
+              model.statusLink ? h("button", {
+                className: "slds-button slds-button_icon slds-button_icon-border-filled slds-m-left_x-small",
+                onClick: () => {
+                  const a = document.createElement("a");
+                  a.href = model.statusLink;
+                  a.download = "status_info.json";
+                  document.body.appendChild(a);
+                  a.click();
+                  document.body.removeChild(a);
+                },
+                title: "Save status info"
+              },
+              h("svg", {className: "slds-button__icon"},
+                h("use", {xlinkHref: "symbols.svg#info"})
+              )
               ) : null,
               h("button", {className: "slds-button slds-button_icon slds-button_icon-border-filled slds-m-left_x-small", onClick: () => this.downloadXml(), title: "Download package.xml"},
                 h("svg", {className: "slds-button__icon"},
@@ -1125,6 +1149,7 @@ class App extends React.Component {
                   },
                   h("option", {value: "NoTestRun"}, "No Test Run"),
                   h("option", {value: "RunSpecifiedTests"}, "Run Specified Tests"),
+                  h("option", {value: "RunRelevantTests"}, "Run Relevant Tests (beta)"),
                   h("option", {value: "RunLocalTests"}, "Run Local Tests"),
                   h("option", {value: "RunAllTestsInOrg"}, "Run All Tests in Org")
                   )

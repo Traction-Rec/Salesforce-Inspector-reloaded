@@ -124,18 +124,34 @@ If you want to _always_ open extension's links in a new tab, you can enable> **W
 * Event <ins>M</ins>onitor : m
 * <ins>F</ins>ield Creator : f
 
-## Disable metadata search from Shortcut tab
+## Shortcut tab search
 
-By default when you enter keyword in the Shortcut tab, the search is performed on the Setup link shortcuts _AND_ metadata (Flows, PermissionSets and Profiles).
-If you want to disable the search on the metadata, update related option:
+By default when you enter a keyword in the Shortcut tab, the search is performed on the Setup link shortcuts _AND_ metadata (Flows, Profiles, Permission Sets and Apex Classes).
+
+Metadata search can be slow on orgs with a lot of metadata. Use search prefixes to narrow the scope and speed up results:
+
+| Prefix | Scope | Example |
+| --- | --- | --- |
+| _(none)_ | Setup links + metadata (default) | `profiles` |
+| `/` | Setup / custom links only (no API call) | `/profiles` |
+| `!` | All metadata types | `!MyMetadata` |
+| `!flow` | Flows only | `!flow Onboarding` |
+| `!profile` | Profiles only | `!profile System` |
+| `!class` / `!apex` | Apex Classes only | `!class AccountService` |
+| `!perm` / `!pset` | Permission Sets only | `!perm Sales` |
+
+Notes:
+
+* Prefix type aliases are case-insensitive (`!Profile`, `!FLOW`, etc.).
+* Typed metadata prefixes (`!flow`, `!profile`, …) always query that metadata type, even if it is unchecked under **Searchable metadata from Shortcut tab**.
+* Metadata queries still require at least 2 characters after the prefix (for example `!flow Ab`).
+* `/` is local-only and is the fastest way to find a Setup page from the built-in / custom shortcut list.
+
+### Disable metadata search from Shortcut tab
+
+If you want to disable metadata search for the default (unprefixed) queries, update related option:
 
 <img width="892" alt="image" src="https://github.com/user-attachments/assets/2541fc22-9f1b-4cd1-90cd-d4615b313d96">
-
-## Enable / Disable Flow scrollability
-
-Go on a Salesforce flow and check / uncheck the checbox to update navigation scrollability on the Flow Builder
-
-![2023-09-29_16-01-14 (1)](https://github.com/tprouvot/Salesforce-Inspector-reloaded/assets/35368290/91845a31-8f53-4ea1-b895-4cb036d1bed0)
 
 ## Compare Flow Versions
 
@@ -168,11 +184,25 @@ Once Flow Builder opens:
 3. Flow Builder will display both versions side-by-side, highlighting differences
 4. Review changes, elements, and logic differences between the versions
 
+## Mass disable flows
+
+You can bulk deactivate flows using the Data Import feature with the Tooling API.
+
+1. Open **Data Import** (shortcut: `i`)
+2. Set **API Type** to **Tooling**
+3. Set **Object** to **FlowDefinition**
+4. Set **Action** to **Update**
+5. Paste your data with two columns:
+   * **Id** – the FlowDefinition Id (from a query like `SELECT Id, DeveloperName FROM FlowDefinition WHERE ActiveVersionId != null`)
+   * **Metadata.activeVersionNumber** – set to `0` to deactivate
+6. Map the columns (use "Skip" for any unknown columns if needed)
+7. Click **Run Update**
+
 ## Add custom links to "Shortcut" tab
 
 <img width="1234" alt="Use custom shortcuts" src="https://github.com/user-attachments/assets/036045b8-133c-46c1-90d0-1db7aa81a190" />
 
-You can add custom links to the "Shortcut" tab. These links will be stored in the `sfHost + "_orgLinks"` localStorage variable. The links are stored as a JSON array with the following properties:
+You can add custom links to the "Shortcut" tab. By default, links are org-specific and stored in the `sfHost + "_orgLinks"` localStorage variable. The links are stored as a JSON array with the following properties:
 
 * `label`: The label of the link
 * `link`: The link to the page
@@ -185,12 +215,20 @@ The links are displayed in a table format with the following features:
 * Search functionality to filter links by label, link, or section
 * Edit and delete buttons for each link
 * Add button to create new links
+* A "Global" toggle to share a link across every org instead of keeping it specific to the current org
+
+### Global links
+
+Each link has a "Global" toggle. When it's off (the default), the link is specific to the current org and stored under `sfHost + "_orgLinks"`. When it's turned on, the link is moved into a single shared `globalLinks` localStorage variable (not prefixed by org) and becomes visible in every org's Shortcut tab and popup search.
+
+Because `globalLinks` is a single list shared by all orgs, editing or deleting a global link from any org's Options page affects what every other org sees. Toggling the flag back off moves the link back into the current org's own list.
 
 To add a new link:
 
 1. Click the "+" button at the bottom of the table
 2. Fill in the label, link, and section fields
-3. Click the check icon to save or the X icon to cancel
+3. Optionally turn on the "Global" toggle to make the link visible in every org
+4. Click the check icon to save or the X icon to cancel
 
 To edit a link:
 
@@ -217,6 +255,27 @@ To sort links:
 The links are stored in the browser's localStorage, so they will persist between sessions. The links are specific to each org, so you can have different links for different orgs.
 
 <img width="278" alt="Custom Link Search" src="https://github.com/user-attachments/assets/5ccd6778-4fb2-46d5-9b54-cd47cb03c7bb" />
+
+### Switch between Lightning apps
+
+You can add custom shortcuts to jump directly to any Lightning app — no more navigating through the App Launcher.
+
+In Lightning, each app has a URL you can find in the browser by copying the link. Use that relative path as the **Link** value when creating a shortcut.
+
+<img width="1325" height="454" alt="Custom shortcuts configuration for switching apps" src="https://github.com/user-attachments/assets/a0e8a68d-5e0e-4f6f-83ad-5c118eea1c6f" />
+
+Once configured, the shortcuts appear in the popup and can be triggered by typing their label in the search box:
+
+<img width="278" height="702" alt="Switching apps from the shortcut tab" src="https://github.com/user-attachments/assets/23c6f67f-16a1-406a-b443-2a67a2ee889e" />
+
+### Switch between Classic and Lightning
+
+Use the following relative URLs to switch between Salesforce Classic and Lightning Experience:
+
+* **Switch to Lightning**: `/user/switchToLightning`
+* **Switch to Classic**: `/user/switchToClassic`
+
+Create one shortcut for each, give them descriptive labels (e.g. `Switch to Lightning` / `Switch to Classic`), and you can toggle between the two UIs in one click from the Shortcuts tab.
 
 ## Enable summary view of PermissionSet / PermissionSetGroups from shortcut tab
 
@@ -374,35 +433,86 @@ You can configure which tab should be selected by default when opening the popup
 
 The selected tab will be remembered and used as the default when opening the popup.
 
+## Show recently viewed records in popup
+
+When you focus the Object search field in the popup, the extension queries and displays your recently viewed records for quick access. This is **enabled by default**. The option allows you to disable it if you prefer not to query or display recently viewed records:
+
+1. Open the options page
+2. Go to the "User Experience" tab
+3. Find the "Show recently viewed records in popup" toggle
+4. Disable it to skip the query and only show search results as you type
+
+When disabled, no API call is made to the RecentlyViewed object, which can reduce API usage and improve popup responsiveness.
+
 ## API Cache Configuration
 
 Salesforce Inspector Reloaded uses a caching system to reduce the number of API calls made to Salesforce, improving performance and reducing API usage. The extension caches API response data to optimize queries and avoid unnecessary API requests.
+
+All cache settings are configured in the **Cache** tab of the Options page:
+
+1. Open the extension and click the "Options" button
+2. Navigate to the "Cache" tab
 
 ### Cached Requests
 
 The following API requests are cached:
 
-* **User Object Describe** (`/services/data/vXX.0/sobjects/User/describe`) - Caches field permission information to optimize user search queries and dynamically build SELECT clauses based on accessible fields
+* **User Field Names** (`/services/data/vXX.0/sobjects/User/describe`) - Caches field permission information to optimize user search queries and dynamically build SELECT clauses based on accessible fields
+
+* **SObjects List** - Caches the list of all SObjects (standard and custom objects, tooling objects) from the REST API and Tooling API
 
 ### Why Use Caching?
 
-* **Reduced API Calls**: Caching field permissions means the extension doesn't need to call the describe API every time you search for users
-* **Better Performance**: Faster user searches since cached data is retrieved instantly
-* **Optimized Queries**: The extension builds queries dynamically based on cached field permissions, only including fields you have access to
-* **API Limit Preservation**: Helps preserve your Salesforce API request limits by avoiding redundant describe calls
+* **Reduced API Calls**: Caching means the extension doesn't need to call the describe API every time you search for users or load the SObjects list
+* **Better Performance**: Faster user searches and popup loading since cached data is retrieved instantly
+* **Optimized Queries**: The extension builds queries dynamically based on cached field permissions
+* **API Limit Preservation**: Helps preserve your Salesforce API request limits by avoiding redundant API calls
 
-### Configuring Cache Period
+### User Field Names Cache
 
-You can configure how long cached data should be stored:
+Configure the duration (in hours) for caching User field names. Default: 168 hours (7 days). Use the "Clear Cache" button to immediately refresh cached data.
 
-1. Open the extension and click the "Options" button
-2. Navigate to the "User Experience" tab
-3. Find the "API cache period (days)" setting
-4. Enter the number of days you want cached data to remain valid (default: 7 days)
-5. Click the "Clear Cache" button if you need to immediately refresh cached data
+## SObjects List Cache Management
+
+The SObjects list cache stores the list of all available objects in your org (Account, Contact, custom objects, Tooling API objects, etc.). This improves popup loading performance by avoiding API calls every time you open the extension or access the Objects tab.
+
+### How It Works
+
+* **When cache is enabled**: The extension returns cached data immediately and optionally refreshes it in the background (see below)
+* **When cache is disabled**: A fresh fetch is performed each time the SObjects list is needed
+* **Org-specific**: Each Salesforce org has its own cache; switching orgs automatically uses the correct cache
+
+### Cache Behavior
+
+The behavior depends on two options:
+
+| Preload SObjects | Cache Duration | Behavior |
+|------------------|----------------|----------|
+| **Enabled** (default) | Recommended: 8 hours | SObjects list is loaded from cache before the popup opens. Refresh happens every N hours when the popup is opened. |
+| **Disabled** | Recommended: 168 hours (7 days) | SObjects list loads only when the Objects tab is accessed. Cached data is returned immediately; a background refresh updates the cache when the popup is opened. |
 
 > **Note**
-> The cache is org-specific, meaning each Salesforce org has its own cached data. Cache entries are automatically cleared when they expire based on your configured cache period.
+> "Preload SObjects before popup opens" is in the **API** tab of Options. When enabled, the extension preloads the SObjects list for faster context detection (e.g., knowing which object you're viewing). When disabled, the list loads only when you open the Objects tab.
+
+### Configuring SObjects Cache
+
+1. Open the extension and click the "Options" button
+2. Navigate to the "Cache" tab
+3. Find the "SObjects List Cache" section:
+   * **Enable/Disable**: Toggle caching on or off (enabled by default)
+   * **Duration (hours)**: How long cached data remains valid. Default: 8 hours. Minimum: 1 hour
+   * **Clear Cache**: Click to immediately clear the cache and force a fresh fetch on next use
+
+### When to Clear the Cache
+
+Clear the SObjects List cache when:
+
+* A newly created custom object doesn't appear in the extension's object search
+* You've deployed new objects or made metadata changes
+* You want to ensure you're seeing the latest object list
+
+> **Note**
+> Cache entries expire automatically based on the configured duration. After expiration, the extension fetches fresh data on the next popup open or Objects tab access.
 
 ## Customize User Tab Search Filters and Fields
 

@@ -4,16 +4,31 @@
     "eslint": "eslint .",
     "firefox-release-build": "node scripts/release-build.js firefox",
     "chrome-release-build": "node scripts/release-build.js chrome",
-    "build-flow-scanner": "node scripts/build-flow-scanner.js"
+    "build-flow-scanner": "node scripts/build-flow-scanner.js",
+    "set-test-constants": "node scripts/set-test-constants-from-org.js",
+    "test:e2e": "playwright test",
+    "test:e2e:mock": "cp tests/e2e/test-constants.template.js tests/e2e/test-constants.local.js && playwright test",
+    "test:e2e:debug": "npx playwright test --ui --debug",
+    "chrome-beta-build": "ENVIRONMENT_TYPE=BETA node scripts/release-build.js chrome"
   },
   "devDependencies": {
     "@eslint/compat": "^1.2.2",
     "@eslint/js": "^9.14.0",
+    "@playwright/test": "^1.57.0",
+    "@types/node": "^25.0.2",
     "eslint": "^9.14.0",
     "eslint-plugin-react": "^7.37.2",
     "fs-extra": "11.2.0",
     "globals": "^15.12.0",
     "replace-in-file": "8.2.0",
     "zip-dir": "2.0.0"
+  },
+  "overrides": {
+    "minimatch@3.1.5": {
+      "brace-expansion": "1.1.17"
+    },
+    "minimatch@9.0.9": {
+      "brace-expansion": "2.1.3"
+    }
   }
 }

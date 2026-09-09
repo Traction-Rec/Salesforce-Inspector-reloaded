@@ -27,7 +27,9 @@
     "https://*.crmforce.mil/*",
     "https://*.force.com.mcas.ms/*",
     "https://generativelanguage.googleapis.com/*",
-    "cookies"
+    "cookies",
+    "storage",
+    "unlimitedStorage"
   ],
   "content_scripts": [
     {
