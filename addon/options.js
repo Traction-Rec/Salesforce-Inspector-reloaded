@@ -1,7 +1,7 @@
 /* global React ReactDOM */
 import {sfConn, apiVersion, defaultApiVersion} from "./inspector.js";
-import {nullToEmptyString, getLatestApiVersionFromOrg, Constants, UserInfoModel, createSpinForMethod, DataCache} from "./utils.js";
-import {getFlowScannerRules} from "./flow-scanner.js";
+import {nullToEmptyString, getLatestApiVersionFromOrg, Constants, UserInfoModel, createSpinForMethod, DataCache, applyProductionStyling} from "./utils.js";
+import {getFlowScannerRules, FLOW_SCANNER_RULES_STORAGE_KEY} from "./flow-scanner-rules.js";
 /* global initButton, lightningflowscanner */
 import {DescribeInfo} from "./data-load.js";
 import Toast from "./components/Toast.js";
@@ -17,11 +17,7 @@ class Model {
     this.orgName = this.sfHost.split(".")[0]?.toUpperCase() || "";
     this.spinnerCount = 0;
 
-    let trialExpDate = localStorage.getItem(sfHost + "_trialExpirationDate");
-    if (localStorage.getItem(sfHost + "_isSandbox") != "true" && (!trialExpDate || trialExpDate === "null")) {
-      //change background color for production
-      document.body.classList.add("sfir-prod");
-    }
+    applyProductionStyling(sfHost);
 
     // Initialize spinFor method
     this.spinFor = createSpinForMethod(this);
@@ -76,7 +72,6 @@ class OptionsTabSelector extends React.Component {
         tabTitle: "User Experience",
         content: [
           {option: ArrowButtonOption, props: {key: 1}},
-          {option: Option, props: {type: "toggle", title: "Flow Scrollability", key: "scrollOnFlowBuilder"}},
           {option: Option, props: {type: "toggle", title: "Inspect page - Show table borders", key: "displayInspectTableBorders"}},
           {option: Option, props: {type: "toggle", title: "Always open links in a new tab", key: "openLinksInNewTab", tooltip: "Enabling this option will prevent Lightning Navigation (faster loading) to be used"}},
           {option: Option, props: {type: "toggle", title: "Open Permission Set / Permission Set Group summary from shortcuts", key: "enablePermSetSummary"}},
@@ -87,7 +82,6 @@ class OptionsTabSelector extends React.Component {
                 {label: "Flows", name: "flows", checked: true},
                 {label: "Profiles", name: "profiles", checked: true},
                 {label: "PermissionSets", name: "permissionSets", checked: true},
-                {label: "Communities", name: "networks", checked: true},
                 {label: "Apex Classes", name: "classes", checked: false}
               ]}
           },
@@ -113,11 +107,8 @@ class OptionsTabSelector extends React.Component {
           {option: Option, props: {type: "toggle", title: "Enable Lightning Navigation", key: "lightningNavigation", default: true, tooltip: "Enable faster navigation by using standard e.force:navigateToURL method"}},
           {option: MultiCheckboxButtonGroup,
             props: {title: "Exclude users from search (org specific)",
-              key: this.sfHost + "_userSearchExclusions",
-              checkboxes: [
-                {label: " Exclude Portal users", name: "portal", checked: false},
-                {label: " Exclude Inactive users", name: "inactive", checked: false}
-              ]}
+              key: this.sfHost + Constants.USER_SEARCH_EXCLUSIONS_KEY,
+              checkboxes: Constants.USER_SEARCH_EXCLUSIONS_CHECKBOXES.map(({label, name}) => ({label, name, checked: false}))}
           },
           {option: MultiCheckboxButtonGroup,
             props: {title: "User Default Search Fields",
@@ -141,32 +132,8 @@ class OptionsTabSelector extends React.Component {
                 {label: "Org", name: "org"}
               ]}
           },
-          {option: Option,
-            props: {type: "number",
-              title: "API cache period (days)",
-              key: "cachePeriodDays",
-              default: 7,
-              min: 1,
-              inputSize: "3",
-              tooltip: "Some API request are redundant, to limit the number of calls, we implemented a cache. This option allows you to configure the cache period.",
-              actionButton: {
-                label: "Clear Reloaded Cache",
-                title: "Clear extension Cache",
-                onClick: (e, model, appRef) => {
-                  DataCache.clearCache("userFieldNames", model.sfHost);
-                  if (appRef) {
-                    appRef.setState({
-                      showToast: true,
-                      toastMessage: "User describe cache cleared successfully.",
-                      toastVariant: "success",
-                      toastTitle: "Success"
-                    });
-                    setTimeout(() => appRef.hideToast(), 3000);
-                  }
-                }
-              }}
-          },
           {option: Option, props: {type: "toggle", title: "Enable Dynamic Popup Height", key: "popupHeighDynamictMode", default: false, tooltip: "When enabled, the popup height will be dynamically adjusted based on the content."}},
+          {option: Option, props: {type: "toggle", title: "Show recently viewed records in popup", key: Constants.ENABLE_RECENTLY_VIEWED_RECORDS, default: true, tooltip: "When enabled, queries and displays recently viewed records when focusing the Object search field in the popup."}},
         ]
       },
       {
@@ -190,7 +157,68 @@ class OptionsTabSelector extends React.Component {
                 }
               }}},
           {option: Option, props: {type: "text", title: "Rest Header", placeholder: "Rest Header", key: "createUpdateRestCalloutHeaders", inputSize: "6"}},
-          {option: Option, props: {type: "toggle", title: "Enable API Stats Debug Mode", key: Constants.API_DEBUG_STATISTICS_MODE, default: false, tooltip: "When enabled, tracks API call statistics (REST and SOAP) to help monitor API usage. Statistics can be viewed on the API Debug Statistics page."}}
+          {option: Option, props: {type: "toggle", title: "Enable API Stats Debug Mode", key: Constants.API_DEBUG_STATISTICS_MODE, default: false, tooltip: "When enabled, tracks API call statistics (REST and SOAP) to help monitor API usage. Statistics can be viewed on the API Debug Statistics page."}},
+          {option: Option, props: {type: "toggle", title: "Preload SObjects before popup opens", key: Constants.PRELOAD_SOBJECTS_BEFORE_POPUP, default: true, tooltip: "When enabled, loads the SObjects list from cache before the popup is opened for faster context detection. Disable to reduce initial load time and only load when the Objects tab is accessed."}},
+          {option: Option, props: {type: "toggle", title: "QA Internal", key: Constants.QA_INTERNAL_MODE, default: false, tooltip: "When enabled, prefixes the API client id sent with internal QA."}},
+        ]
+      },
+      {
+        id: "cache",
+        tabTitle: "Cache",
+        content: [
+          {option: Option,
+            props: {
+              type: "button",
+              title: "Clear All Extension Cache",
+              key: "clearAllCache",
+              tooltip: "Clear all cache entries from both localStorage and browser.storage.local. This will remove all cached data including User Field Names, SObjects List, and any other cached information.",
+              actionButtonVariant: "destructive",
+              actionButton: {
+                label: "Clear All Cache",
+                title: "Clear all extension cache",
+                onClick: async (e, model, appRef) => {
+                  await DataCache.clearAllExtensionCache();
+                  if (appRef) {
+                    appRef.setState({
+                      showToast: true,
+                      toastMessage: "All extension cache cleared successfully.",
+                      toastVariant: "success",
+                      toastTitle: "Success"
+                    });
+                    setTimeout(() => appRef.hideToast(), 3000);
+                  }
+                }
+              }
+            }
+          },
+          {option: Option,
+            props: {
+              type: "number",
+              title: "User Field Names Cache Duration (hours)",
+              key: "cacheDuration_userFieldNames",
+              default: 168,
+              min: 1,
+              inputSize: "3",
+              tooltip: "Duration in hours for caching User field names. This cache stores User object field metadata to improve performance.",
+              actionButton: {
+                label: "Clear Cache",
+                title: "Clear User Field Names cache",
+                onClick: async (e, model, appRef) => {
+                  await DataCache.clearCache("userFieldNames", model.sfHost, false, false);
+                  if (appRef) {
+                    appRef.setState({
+                      showToast: true,
+                      toastMessage: "User Field Names cache cleared successfully.",
+                      toastVariant: "success",
+                      toastTitle: "Success"
+                    });
+                    setTimeout(() => appRef.hideToast(), 3000);
+                  }
+                }
+              }
+            }
+          },
+          {option: SObjectsCacheOptions, props: {key: "sobjectsCacheOptions"}}
         ]
       },
       {
@@ -429,7 +457,7 @@ class OptionsTabSelector extends React.Component {
 
   handleExportRules() {
     // Export only Flow Scanner related localStorage keys
-    const flowScannerFilters = ["flowScannerRules"];
+    const flowScannerFilters = [FLOW_SCANNER_RULES_STORAGE_KEY];
     // Get reference to App component to call its exportOptions method
     if (this.appRef) {
       this.appRef.exportOptions(flowScannerFilters);
@@ -438,7 +466,7 @@ class OptionsTabSelector extends React.Component {
 
   handleImportRules() {
     if (this.appRef) {
-      this.appRef.pendingImportFilters = ["flowScannerRules"];
+      this.appRef.pendingImportFilters = [FLOW_SCANNER_RULES_STORAGE_KEY];
       this.appRef.refs.fileInput.click();
     }
   }
@@ -694,8 +722,10 @@ class Option extends React.Component {
     this.tooltip = props.tooltip;
     this.placeholder = props.placeholder;
     this.actionButton = props.actionButton;
+    this.actionButtonVariant = props.actionButtonVariant || "brand"; // Default to "brand" variant (blue button)
     this.inputSize = props.inputSize || "3";
     this.min = props.min; // Minimum value for number input type (sets HTML min attribute)
+    this.readOnly = props.readOnly || false;
 
     // Enhanced properties
     this.enhancedTitle = props.enhancedTitle;
@@ -819,6 +849,7 @@ class Option extends React.Component {
       placeholder: this.placeholder,
       value: nullToEmptyString(this.state[this.key]),
       onChange: this.onChange,
+      readOnly: this.readOnly,
       ...(this.type === "number" && this.min !== undefined ? {min: this.min} : {})
     })
       : isTextArea ? h("textarea", {
@@ -826,7 +857,8 @@ class Option extends React.Component {
         className: isEnhanced ? "slds-input enhanced-option-input" : "slds-input",
         placeholder: this.placeholder,
         value: nullToEmptyString(this.state[this.key]),
-        onChange: this.onChange
+        onChange: this.onChange,
+        readOnly: this.readOnly
       })
       : isSelect ? h("select", {
         className: isEnhanced ? "slds-select enhanced-option-input" : "slds-select slds-m-right_small",
@@ -873,6 +905,7 @@ class Option extends React.Component {
   render() {
     const id = this.key;
     const isToggle = this.type == "toggle";
+    const isButton = this.type == "button";
     const isEnhanced = this.enhancedTitle || this.badge || this.severity || this.description;
 
     if (isEnhanced) {
@@ -947,8 +980,8 @@ class Option extends React.Component {
             )
           ),
 
-          // Input controls for non-toggle types
-          !isToggle && this.renderInputControl(id, true)
+          // Input controls for non-toggle and non-button types
+          !isToggle && !isButton && this.renderInputControl(id, true)
         )
       );
     } else {
@@ -961,15 +994,15 @@ class Option extends React.Component {
         ),
         h("div", {className: "slds-col slds-size_9-of-12"},
           h("div", {className: "slds-grid slds-grid_vertical-align-center slds-gutters_small"},
-            // Input field container with configurable size
-            !isToggle && h("div", {className: "slds-col slds-size_" + this.inputSize + "-of-12"},
+            // Input field container with configurable size (not for toggle or button types)
+            !isToggle && !isButton && h("div", {className: "slds-col slds-size_" + this.inputSize + "-of-12"},
               this.renderInputControl(id, false)
             ),
             // Action button (if present)
             // appRef is passed to allow actionButton handlers to show toast notifications via appRef.setState()
             this.actionButton && h("div", {className: "slds-col"},
               h("button", {
-                className: "slds-button slds-button_brand",
+                className: `slds-button slds-button_${this.actionButtonVariant}`,
                 onClick: (e) => this.actionButton.onClick(e, this.props.model, this.props.appRef),
                 title: this.actionButton.title || "Action"
               }, this.actionButton.label || "Action")
@@ -1285,6 +1318,114 @@ class MultiCheckboxButtonGroup extends React.Component {
   }
 }
 
+class SObjectsCacheOptions extends React.Component {
+
+  constructor(props) {
+    super(props);
+    this.model = props.model;
+    this.appRef = props.appRef;
+    this.onChangeCacheEnabled = this.onChangeCacheEnabled.bind(this);
+    this.onChangeCacheDuration = this.onChangeCacheDuration.bind(this);
+    this.onClearCache = this.onClearCache.bind(this);
+
+    const cacheEnabledKey = Constants.ENABLE_SOBJECTS_LIST_CACHE;
+    const cacheDurationKey = "cacheDuration_" + Constants.CACHE_SOBJECTS_LIST;
+
+    const cacheEnabled = localStorage.getItem(cacheEnabledKey);
+    const cacheDuration = localStorage.getItem(cacheDurationKey);
+
+    this.state = {
+      cacheEnabled: cacheEnabled !== null ? JSON.parse(cacheEnabled) : true,
+      cacheDuration: cacheDuration !== null ? cacheDuration : "8"
+    };
+  }
+
+  onChangeCacheEnabled(e) {
+    const enabled = e.target.checked;
+    this.setState({cacheEnabled: enabled});
+    localStorage.setItem(Constants.ENABLE_SOBJECTS_LIST_CACHE, JSON.stringify(enabled));
+  }
+
+  onChangeCacheDuration(e) {
+    const duration = e.target.value;
+    this.setState({cacheDuration: duration});
+    localStorage.setItem("cacheDuration_" + Constants.CACHE_SOBJECTS_LIST, duration);
+  }
+
+  async onClearCache() {
+    await DataCache.clearCache(Constants.CACHE_SOBJECTS_LIST, this.model.sfHost, true, true);
+    if (this.appRef) {
+      this.appRef.setState({
+        showToast: true,
+        toastMessage: "SObjects List cache cleared successfully.",
+        toastVariant: "success",
+        toastTitle: "Success"
+      });
+      setTimeout(() => this.appRef.hideToast(), 3000);
+    }
+  }
+
+  render() {
+    return h("div", {className: "slds-grid slds-border_bottom slds-p-horizontal_small slds-p-vertical_xx-small"},
+      h("div", {className: "slds-col slds-size_3-of-12 text-align-middle"},
+        h("span", {}, "SObjects List Cache",
+          h(Tooltip, {tooltip: "Enable caching of the SObjects list to improve popup loading performance.", idKey: "sobjectsCacheOption"})
+        )
+      ),
+      h("div", {className: "slds-col slds-size_9-of-12"},
+        h("div", {className: "slds-grid slds-grid_vertical-align-center slds-gutters_small"},
+          h("div", {className: "slds-col slds-size_1-of-2"},
+            h("div", {dir: "ltr", className: "slds-form-element__control"},
+              h("label", {className: "slds-checkbox_toggle slds-grid"},
+                h("input", {
+                  type: "checkbox",
+                  required: true,
+                  id: "enableSobjectsCache",
+                  "aria-describedby": "enableSobjectsCache",
+                  className: "slds-input",
+                  checked: this.state.cacheEnabled,
+                  onChange: this.onChangeCacheEnabled
+                }),
+                h("span", {id: "enableSobjectsCache", className: "slds-checkbox_faux_container center-label"},
+                  h("span", {className: "slds-checkbox_faux"}),
+                  h("span", {className: "slds-checkbox_on"}, "Enabled"),
+                  h("span", {className: "slds-checkbox_off"}, "Disabled")
+                )
+              )
+            )
+          ),
+          h("div", {className: "slds-col slds-size_1-of-2"},
+            h("div", {className: "slds-grid slds-grid_vertical-align-center slds-gutters_small"},
+              h("div", {className: "slds-col slds-size_4-of-12"},
+                h("label", {className: "slds-form-element__label", htmlFor: "sobjectsCacheDuration"}, "Duration (hours):",
+                  h(Tooltip, {tooltip: "If 'Preload SObjects before popup opens' is enabled, recommended value is 8 (to force a refresh every 8 hours), else recommended value is 168 (7 days - refresh when the popup is opened in background)", idKey: "sobjectsCacheDurationTooltip"})),
+              ),
+              h("div", {className: "slds-col slds-size_3-of-12"},
+                h("div", {className: "slds-form-element__control"},
+                  h("input", {
+                    type: "number",
+                    id: "sobjectsCacheDuration",
+                    className: "slds-input",
+                    value: nullToEmptyString(this.state.cacheDuration),
+                    onChange: this.onChangeCacheDuration,
+                    min: 1
+                  })
+                )
+              ),
+              h("div", {className: "slds-col"},
+                h("button", {
+                  className: "slds-button slds-button_brand",
+                  onClick: this.onClearCache,
+                  title: "Clear SObjects List cache"
+                }, "Clear Cache")
+              )
+            )
+          )
+        )
+      )
+    );
+  }
+}
 
 class CSVSeparatorOption extends React.Component {
 
@@ -1373,16 +1514,33 @@ class CustomShortcuts extends React.Component {
     this.onCancelEdit = this.onCancelEdit.bind(this);
     this.onSort = this.onSort.bind(this);
     this.onSearch = this.onSearch.bind(this);
+    this.onToggleGlobal = this.onToggleGlobal.bind(this);
     this.state = {
-      shortcuts: JSON.parse(localStorage.getItem(this.sfHost + "_orgLinks") || "[]"),
+      shortcuts: this.loadShortcuts(),
       editingIndex: -1,
-      newShortcut: {label: "", link: "", section: "", isExternal: false},
+      newShortcut: {label: "", link: "", section: "", isExternal: false, isGlobal: false},
       sortConfig: {
         key: null,
         direction: "asc"
       },
       searchTerm: ""
     };
+  }
+
+  loadShortcuts() {
+    const orgShortcuts = JSON.parse(localStorage.getItem(this.sfHost + "_orgLinks") || "[]")
+      .map((shortcut) => ({...shortcut, isGlobal: false}));
+    const globalShortcuts = JSON.parse(localStorage.getItem(Constants.GLOBAL_LINKS_KEY) || "[]")
+      .map((shortcut) => ({...shortcut, isGlobal: true}));
+    return [...orgShortcuts, ...globalShortcuts];
+  }
+
+  persistShortcuts(shortcuts) {
+    const toStoredShortcut = ({label, link, section, isExternal}) => ({label, link, section, isExternal});
+    const orgShortcuts = shortcuts.filter((shortcut) => !shortcut.isGlobal).map(toStoredShortcut);
+    const globalShortcuts = shortcuts.filter((shortcut) => shortcut.isGlobal).map(toStoredShortcut);
+    localStorage.setItem(this.sfHost + "_orgLinks", JSON.stringify(orgShortcuts));
+    localStorage.setItem(Constants.GLOBAL_LINKS_KEY, JSON.stringify(globalShortcuts));
   }
 
   onSearch(e) {
@@ -1465,7 +1623,7 @@ class CustomShortcuts extends React.Component {
   onAddShortcut() {
     this.setState({
       editingIndex: this.state.shortcuts.length,
-      newShortcut: {label: "", link: "", section: "", isExternal: false}
+      newShortcut: {label: "", link: "", section: "", isExternal: false, isGlobal: false}
     });
   }
 
@@ -1480,7 +1638,7 @@ class CustomShortcuts extends React.Component {
     const newShortcuts = [...this.state.shortcuts];
     newShortcuts.splice(index, 1);
     this.setState({shortcuts: newShortcuts});
-    localStorage.setItem(this.sfHost + "_orgLinks", JSON.stringify(newShortcuts));
+    this.persistShortcuts(newShortcuts);
   }
 
   onSaveShortcut() {
@@ -1499,16 +1657,29 @@ class CustomShortcuts extends React.Component {
     this.setState({
       shortcuts: newShortcuts,
       editingIndex: -1,
-      newShortcut: {label: "", link: "", section: "", isExternal: false}
+      newShortcut: {label: "", link: "", section: "", isExternal: false, isGlobal: false}
     });
 
-    localStorage.setItem(this.sfHost + "_orgLinks", JSON.stringify(newShortcuts));
+    this.persistShortcuts(newShortcuts);
   }
 
   onCancelEdit() {
     this.setState({
       editingIndex: -1,
-      newShortcut: {label: "", link: "", section: ""}
+      newShortcut: {label: "", link: "", section: "", isGlobal: false}
+    });
+  }
+
+  onToggleGlobal(index) {
+    const newShortcuts = [...this.state.shortcuts];
+    newShortcuts[index] = {...newShortcuts[index], isGlobal: !newShortcuts[index].isGlobal};
+    this.setState({shortcuts: newShortcuts});
+    this.persistShortcuts(newShortcuts);
+  }
+
+  onToggleNewShortcutGlobal(checked) {
+    this.setState({
+      newShortcut: {...this.state.newShortcut, isGlobal: checked}
     });
   }
 
@@ -1584,6 +1755,9 @@ class CustomShortcuts extends React.Component {
               h("div", {className: "slds-truncate", title: "External"}, "External")
             ),
             h("th", {scope: "col"},
+              h("div", {className: "slds-truncate", title: "Global"}, "Global")
+            ),
+            h("th", {scope: "col"},
               h("div", {className: "slds-truncate", title: "Actions"}, "Actions")
             )
           )
@@ -1632,6 +1806,22 @@ class CustomShortcuts extends React.Component {
                   )
                 )
               ),
+              h("td", {key: "global", "data-label": "Global"},
+                h("div", {className: "slds-truncate"},
+                  h("label", {className: "slds-checkbox_toggle slds-grid", title: newShortcut.isGlobal ? "Visible in every org" : "Visible only in this org"},
+                    h("input", {
+                      type: "checkbox",
+                      checked: !!newShortcut.isGlobal,
+                      onChange: (e) => this.onToggleNewShortcutGlobal(e.target.checked)
+                    }),
+                    h("span", {className: "slds-checkbox_faux_container center-label"},
+                      h("span", {className: "slds-checkbox_faux"}),
+                      h("span", {className: "slds-checkbox_on"}, "Global"),
+                      h("span", {className: "slds-checkbox_off"}, "Org")
+                    )
+                  )
+                )
+              ),
               h("td", {key: "actions", "data-label": "Actions"},
                 h("div", {className: "slds-truncate"},
                   h("button", {
@@ -1664,6 +1854,22 @@ class CustomShortcuts extends React.Component {
                 h("div", {className: "slds-truncate"},
                   shortcut.isExternal && h("svg", {className: "slds-button__icon"},
                     h("use", {xlinkHref: "symbols.svg#check"})
+                  )
+                )
+              ),
+              h("td", {key: "global", "data-label": "Global"},
+                h("div", {className: "slds-truncate"},
+                  h("label", {className: "slds-checkbox_toggle slds-grid", title: shortcut.isGlobal ? "Visible in every org - toggle to make it specific to this org" : "Visible only in this org - toggle to make it global"},
+                    h("input", {
+                      type: "checkbox",
+                      checked: !!shortcut.isGlobal,
+                      onChange: () => this.onToggleGlobal(index)
+                    }),
+                    h("span", {className: "slds-checkbox_faux_container center-label"},
+                      h("span", {className: "slds-checkbox_faux"}),
+                      h("span", {className: "slds-checkbox_on"}, "Global"),
+                      h("span", {className: "slds-checkbox_off"}, "Org")
+                    )
                   )
                 )
               ),
@@ -1733,7 +1939,7 @@ class FlowScannerRules extends React.Component {
       rules: updatedRules,
       resetCounter: prevState.resetCounter + 1
     }));
-    localStorage.setItem("flowScannerRules", JSON.stringify(updatedRules));
+    localStorage.setItem(FLOW_SCANNER_RULES_STORAGE_KEY, JSON.stringify(updatedRules));
   }
 
   checkAllRules() {
@@ -1746,7 +1952,7 @@ class FlowScannerRules extends React.Component {
 
   resetToDefaults() {
     // Remove stored rules to force reload with defaults
-    localStorage.removeItem("flowScannerRules");
+    localStorage.removeItem(FLOW_SCANNER_RULES_STORAGE_KEY);
 
     // Increment reset counter to force component recreation
     this.setState(prevState => ({
@@ -1793,7 +1999,7 @@ class FlowScannerRules extends React.Component {
       });
 
       // Save to localStorage
-      localStorage.setItem("flowScannerRules", JSON.stringify(updatedRules));
+      localStorage.setItem(FLOW_SCANNER_RULES_STORAGE_KEY, JSON.stringify(updatedRules));
 
       return {rules: updatedRules};
     });
@@ -1907,7 +2113,7 @@ class App extends React.Component {
           localStorageData[key] = localStorage.getItem(key);
         }
       }
-      filename = "flowScannerRules.json";
+      filename = `${FLOW_SCANNER_RULES_STORAGE_KEY}.json`;
     } else {
       // Export all localStorage
       localStorageData = {...localStorage};
@@ -2071,10 +2277,5 @@ class App extends React.Component {
       ReactDOM.render(h(App, {model}), root, cb);
     };
     ReactDOM.render(h(App, {model}), root);
-
-    if (parent && parent.isUnitTest) { // for unit tests
-      parent.insextTestLoaded({model});
-    }
-
   });
 }
